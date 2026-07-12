@@ -83,9 +83,10 @@ private keys.
     `cbrinton`).
 - No game ports are currently allowed or published. Add only the documented
     TCP/UDP ports for an active game when it is deployed.
-- Docker is not installed yet. When it is installed, published container ports
-    must also be restricted in Docker's `DOCKER-USER` chain (or equivalent
-    nftables policy); UFW's ordinary inbound rule alone is insufficient.
+- Docker Engine `29.1.3` and Docker Compose `2.40.3` are installed. Published
+    container ports must be restricted in Docker's `DOCKER-USER` chain (or
+    equivalent nftables policy); UFW's ordinary inbound rule alone is
+    insufficient.
 
 To inspect the active policy, use:
 

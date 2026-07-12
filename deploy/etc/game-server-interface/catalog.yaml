@@ -1,0 +1,125 @@
+# Root-owned game interface catalog. Do not store passwords, tokens, or .env data here.
+# This file is the source of truth for the allowlisted game templates and slots.
+schema_version: 1
+catalog_id: bobiverse-game-server-interface
+updated_at: "2026-07-12"
+
+path_templates:
+  instance_data: /srv/games/{template}-{instance}
+  backup_root: /srv/game-backups/{template}-{instance}
+  compose_project: game-{template}-{instance}
+  compose_file: /etc/game-server-interface/instances/{template}-{instance}/compose.yaml
+  systemd_unit: game-{template}-{instance}.service
+  log_file: /var/log/game-server-interface/{template}-{instance}.log
+  service_account: game-{template}-{instance}
+
+templates:
+  valheim:
+    display_name: Valheim
+    description: Dedicated Valheim world for private tailnet players.
+    documentation_url: https://github.com/community-valheim-tools/valheim-server-docker
+    enabled: true
+    supported_players: 10
+    connection:
+      hostname: bobiverse.tail40344b.ts.net
+      protocol: udp
+      password_guidance: Set SERVER_PASS only in the instance secret file; it must be at least five characters.
+    image:
+      # Linux/amd64 manifest resolved from the upstream latest tag on 2026-07-12.
+      reference: ghcr.io/community-valheim-tools/valheim-server
+      digest: sha256:8e44cfce7b98d4460c3950ab85fa4ad8b82f02ab58b9bcd0b1d8a9620addd054
+      source_tag: latest
+      source_url: https://github.com/community-valheim-tools/valheim-server-docker
+      approved_at: "2026-07-12"
+    startup:
+      health_check: UDP game/query-port probe plus a successful server-start log event
+      timeout_seconds: 900
+    resources:
+      cpu_cores: 2
+      memory_mib: 4096
+      disk_gib: 12
+      player_capacity: 10
+    dependencies: []
+    incompatibilities: []
+    instance_policy:
+      multiple_instances: true
+      max_instances: 2
+      allowed_instance_ids: [primary, secondary]
+      slots:
+        primary:
+          display_label: Primary
+          ports:
+            - {protocol: udp, host: 2456, container: 2456}
+            - {protocol: udp, host: 2457, container: 2457}
+        secondary:
+          display_label: Secondary
+          ports:
+            - {protocol: udp, host: 2460, container: 2460}
+            - {protocol: udp, host: 2461, container: 2461}
+    deployment:
+      required_directories: [server, worlds, config, backups, logs]
+      persistent_volumes: [config, data]
+      backup_identity_template: "{template}-{instance}"
+      service_account_uid_gid: assigned-at-registration
+      compose_project_template: game-{template}-{instance}
+      systemd_unit_template: game-{template}-{instance}.service
+    update_policy:
+      require_reviewed_digest: true
+      require_verified_backup: true
+      retain_rollback_candidate: true
+      record_running_digest: true
+
+  enshrouded:
+    display_name: Enshrouded
+    description: Dedicated Enshrouded world for private tailnet players.
+    documentation_url: https://github.com/sknnr/enshrouded-dedicated-server
+    enabled: true
+    supported_players: 16
+    connection:
+      hostname: bobiverse.tail40344b.ts.net
+      protocol: udp
+      password_guidance: Set the server password only in the instance secret file; never add it to this catalog.
+    image:
+      # Linux/amd64 manifest resolved from the upstream latest tag on 2026-07-12.
+      reference: sknnr/enshrouded-dedicated-server
+      digest: sha256:269698c5ae61c4cbf01b9ea8473e84b4ff0b98c843842c60ee6a0a22fca0786e
+      source_tag: latest
+      source_url: https://hub.docker.com/r/sknnr/enshrouded-dedicated-server
+      approved_at: "2026-07-12"
+    startup:
+      health_check: UDP gameplay/query-port probe plus a successful server-start log event
+      timeout_seconds: 1200
+    resources:
+      cpu_cores: 2
+      memory_mib: 6144
+      disk_gib: 30
+      player_capacity: 16
+    dependencies: []
+    incompatibilities: []
+    instance_policy:
+      multiple_instances: true
+      max_instances: 2
+      allowed_instance_ids: [primary, secondary]
+      slots:
+        primary:
+          display_label: Primary
+          ports:
+            - {protocol: udp, host: 15636, container: 15636}
+            - {protocol: udp, host: 15637, container: 15637}
+        secondary:
+          display_label: Secondary
+          ports:
+            - {protocol: udp, host: 15640, container: 15640}
+            - {protocol: udp, host: 15641, container: 15641}
+    deployment:
+      required_directories: [server, worlds, config, backups, logs]
+      persistent_volumes: [data]
+      backup_identity_template: "{template}-{instance}"
+      service_account_uid_gid: assigned-at-registration
+      compose_project_template: game-{template}-{instance}
+      systemd_unit_template: game-{template}-{instance}.service
+    update_policy:
+      require_reviewed_digest: true
+      require_verified_backup: true
+      retain_rollback_candidate: true
+      record_running_digest: true
