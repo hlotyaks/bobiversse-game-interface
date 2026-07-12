@@ -1,0 +1,36 @@
+services:
+  interface:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bobiverse-game-server-interface:phase3
+    user: "995:983"
+    init: true
+    read_only: true
+    restart: "no"
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      CONTROLLER_SOCKET: /run/game-server-interface/controller.sock
+      # Phase 5 enables this only behind the trusted Tailscale Serve boundary.
+      TRUSTED_ACTOR_HEADER: "0"
+    volumes:
+      - type: bind
+        source: /run/game-server-interface
+        target: /run/game-server-interface
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.50
+    networks:
+      - interface
+
+networks:
+  interface:
+    driver: bridge

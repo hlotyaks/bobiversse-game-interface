@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bobiverse · Game Server</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">PRIVATE GAME HOST</p>
+        <h1>Ready when the party is.</h1>
+        <p class="intro">Start a registered world, check its health, and share the private connection details with your group.</p>
+      </div>
+      <div class="host-card">
+        <span>Host</span>
+        <strong>bobiverse.tail40344b.ts.net</strong>
+        <small>Tailnet-only access</small>
+      </div>
+    </header>
+
+    <section class="notice" id="notice" hidden></section>
+    <section class="toolbar">
+      <div>
+        <p class="eyebrow">CATALOG</p>
+        <h2>Available worlds</h2>
+      </div>
+      <button class="button secondary" id="refresh" type="button">Refresh status</button>
+    </section>
+    <section class="grid" id="catalog" aria-live="polite"></section>
+
+    <template id="game-template">
+      <article class="game-card">
+        <div class="game-head">
+          <div>
+            <p class="eyebrow game-id"></p>
+            <h3 class="game-name"></h3>
+          </div>
+          <span class="badge enabled">Available</span>
+        </div>
+        <p class="game-description"></p>
+        <div class="instance-list"></div>
+      </article>
+    </template>
+  </main>
+  <dialog id="confirm-dialog">
+    <form method="dialog">
+      <p class="eyebrow">CONFIRM ACTION</p>
+      <h2 id="dialog-title"></h2>
+      <p id="dialog-text"></p>
+      <menu>
+        <button class="button secondary" value="cancel">Cancel</button>
+        <button class="button danger" id="dialog-confirm" value="confirm">Continue</button>
+      </menu>
+    </form>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>
