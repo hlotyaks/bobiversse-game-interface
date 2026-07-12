@@ -1,0 +1,13 @@
+[Unit]
+Description=Publish Game Server Interface through private Tailscale Serve HTTPS
+After=tailscaled.service game-server-interface.service
+Requires=tailscaled.service game-server-interface.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Serve is private to the tailnet. This deliberately does not enable Funnel.
+ExecStart=/usr/bin/tailscale serve --bg --yes --https=443 unix:/run/game-server-interface/web/interface.sock
+
+[Install]
+WantedBy=multi-user.target

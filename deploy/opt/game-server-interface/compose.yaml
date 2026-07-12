@@ -8,17 +8,20 @@ services:
     init: true
     read_only: true
     restart: "no"
-    ports:
-      - "127.0.0.1:8080:8080"
     environment:
       CONTROLLER_SOCKET: /run/game-server-interface/controller.sock
-      # Phase 5 enables this only behind the trusted Tailscale Serve boundary.
-      TRUSTED_ACTOR_HEADER: "0"
+      INTERFACE_SOCKET: /run/game-server-interface/web/interface.sock
+      # Phase 5 sets this from a root-owned systemd environment file.
+      TRUSTED_ACTOR_HEADER: "${TRUSTED_ACTOR_HEADER:-0}"
     volumes:
       - type: bind
-        source: /run/game-server-interface
-        target: /run/game-server-interface
+        source: /run/game-server-interface/controller.sock
+        target: /run/game-server-interface/controller.sock
         read_only: true
+      - type: bind
+        source: /run/game-server-interface/web
+        target: /run/game-server-interface/web
+        read_only: false
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     cap_drop:

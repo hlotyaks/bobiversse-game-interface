@@ -7,6 +7,7 @@ import json
 import os
 import re
 import socket
+import socketserver
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 CONTROLLER_SOCKET = os.environ.get("CONTROLLER_SOCKET", "/run/game-server-interface/controller.sock")
+INTERFACE_SOCKET = os.environ.get("INTERFACE_SOCKET", "")
 TRUSTED_ACTOR_HEADER = os.environ.get("TRUSTED_ACTOR_HEADER", "0") == "1"
 MAX_BODY_BYTES = 16_384
 MAX_CONTROLLER_RESPONSE_BYTES = 1_048_576
@@ -51,7 +53,7 @@ def controller_request(payload: dict[str, Any]) -> dict[str, Any]:
 def request_actor(headers: Any) -> str:
     if not TRUSTED_ACTOR_HEADER:
         return "local-loopback"
-    value = headers.get("X-Game-Interface-Actor", "")
+    value = headers.get("Tailscale-User-Login", "")
     if not isinstance(value, str) or not value or len(value) > 256 or any(character in value for character in "\r\n"):
         return "tailnet-unattributed"
     return value
@@ -74,7 +76,8 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         # Avoid request headers and request bodies in logs.
-        print(f"{self.client_address[0]} - {format % args}", flush=True)
+        address = self.client_address[0] if isinstance(self.client_address, tuple) else "unix"
+        print(f"{address} - {format % args}", flush=True)
 
     def send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -112,6 +115,8 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/catalog":
             payload = self.controller("list_catalog")
+        elif path == "/api/capacity":
+            payload = self.controller("capacity")
         elif path == "/api/instances":
             instances = self.controller("list_instances")
             if not instances:
@@ -179,6 +184,20 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
+    if INTERFACE_SOCKET:
+        socket_path = Path(INTERFACE_SOCKET)
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if socket_path.exists():
+            socket_path.unlink()
+
+        class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+            daemon_threads = True
+
+        server = UnixHTTPServer(str(socket_path), InterfaceHandler)
+        os.chmod(socket_path, 0o660)
+        print(f"game interface listening on unix:{socket_path}", flush=True)
+        server.serve_forever()
+        return
     host = os.environ.get("INTERFACE_HOST", "0.0.0.0")
     port = int(os.environ.get("INTERFACE_PORT", "8080"))
     server = ThreadingHTTPServer((host, port), InterfaceHandler)

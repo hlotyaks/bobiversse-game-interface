@@ -30,7 +30,7 @@ MAX_LOG_LINES = 100
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 SECRET_PATTERN = re.compile(r"(?i)(password|pass|secret|token|api[_-]?key|key)\s*([=:])\s*[^\s,;]+")
 WRITE_ACTIONS = {"register_instance", "start", "restart"}
-READ_ACTIONS = {"list_catalog", "list_instances", "status", "health", "logs", "operation_status"}
+READ_ACTIONS = {"list_catalog", "list_instances", "status", "health", "logs", "operation_status", "capacity"}
 
 
 class ControllerError(Exception):
@@ -56,7 +56,7 @@ class Controller:
         self.audit_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not self.audit_path.exists():
             self.audit_path.touch(mode=0o600)
-        os.chmod(self.audit_path, 0o600)
+            os.chmod(self.audit_path, 0o600)
 
     def _load_state(self) -> None:
         if not self.state_path.exists():
@@ -125,6 +125,7 @@ class Controller:
         expected_unit = f"game-{template_id}-{instance_id}.service"
         if unit != expected_unit:
             raise ControllerError("catalog systemd unit is invalid")
+        resources = template.get("resources", {})
         return {
             "key": self.instance_key(template_id, instance_id),
             "template_id": template_id,
@@ -135,7 +136,11 @@ class Controller:
             "unit": unit,
             "image": template.get("image", {}).get("reference"),
             "image_digest": template.get("image", {}).get("digest"),
-            "resources": template.get("resources", {}),
+            "resources": resources,
+            "resource_limits": {
+                "compose": {"cpus": str(resources.get("cpu_cores")), "mem_limit": f"{resources.get('memory_mib')}m"},
+                "systemd": {"CPUQuota": f"{float(resources.get('cpu_cores', 0)) * 100:g}%", "MemoryMax": f"{resources.get('memory_mib')}M"},
+            },
             "startup_timeout_seconds": template.get("startup", {}).get("timeout_seconds", 900),
             "paths": resolved_paths,
             "max_instances": policy.get("max_instances"),
@@ -164,6 +169,7 @@ class Controller:
                 "description": template.get("description"),
                 "enabled": template.get("enabled") is True,
                 "supported_players": template.get("supported_players"),
+                "resources": template.get("resources", {}),
                 "instance_ids": template.get("instance_policy", {}).get("allowed_instance_ids", []),
             })
         return output
@@ -177,10 +183,14 @@ class Controller:
             same_template = [item for item in self.instances.values() if item.get("template_id") == template_id]
             if len(same_template) >= resolved["max_instances"]:
                 raise ControllerError("template instance limit reached")
+            admission = self.admission(resolved)
+            if not admission["allowed"]:
+                raise ControllerError("registration rejected: " + "; ".join(admission["reasons"]))
             self.instances[key] = {
                 **resolved,
                 "registered_at": self.now(),
                 "registration_state": "pending-provisioning",
+                "admission": admission,
             }
             self._save_state()
         return self.instances[key]
@@ -199,26 +209,124 @@ class Controller:
         return subprocess.run(["/usr/bin/systemctl", *arguments], capture_output=True, text=True, timeout=30, check=False)
 
     def service_status(self, instance: dict[str, Any]) -> dict[str, Any]:
-        result = self._systemctl("show", instance["unit"], "--no-page", "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus,ActiveEnterTimestamp")
+        result = self._systemctl("show", instance["unit"], "--no-page", "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus,ActiveEnterTimestamp,MemoryCurrent,CPUUsageNSec")
         details = {"load_state": "unknown", "active_state": "unknown", "sub_state": "unknown", "result": "unknown"}
         if result.returncode == 0:
             keys = {
                 "LoadState": "load_state", "ActiveState": "active_state", "SubState": "sub_state",
                 "Result": "result", "ExecMainStatus": "exit_status", "ActiveEnterTimestamp": "active_since",
+                "MemoryCurrent": "memory_current_bytes", "CPUUsageNSec": "cpu_usage_nsec",
             }
             for line in result.stdout.splitlines():
                 name, separator, value = line.partition("=")
                 if separator and name in keys:
                     details[keys[name]] = value
+            memory_current = details.get("memory_current_bytes")
+            if isinstance(memory_current, str) and memory_current.isdigit():
+                details["memory_current_mib"] = round(int(memory_current) / 1024 / 1024, 1)
         else:
             details["message"] = "service unit is not installed or unavailable"
         return {"template_id": instance["template_id"], "instance_id": instance["instance_id"], "unit": instance["unit"], "registration_state": instance["registration_state"], **details}
+
+    @staticmethod
+    def memory_info() -> dict[str, int]:
+        values: dict[str, int] = {}
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                name, _, value = line.partition(":")
+                fields = value.split()
+                if fields and fields[0].isdigit():
+                    values[name] = int(fields[0]) // 1024
+        except OSError:
+            pass
+        return values
+
+    def capacity_policy(self) -> dict[str, Any]:
+        policy = self.catalog().get("capacity_policy")
+        if not isinstance(policy, dict):
+            raise ControllerError("capacity policy is invalid")
+        return policy
+
+    def disk_capacity(self, paths: list[Any]) -> list[dict[str, Any]]:
+        capacities: list[dict[str, Any]] = []
+        seen_devices: set[int] = set()
+        for configured_path in paths:
+            if not isinstance(configured_path, str):
+                continue
+            path = Path(configured_path)
+            while not path.exists() and path != path.parent:
+                path = path.parent
+            try:
+                usage = shutil.disk_usage(path)
+                device = path.stat().st_dev
+            except OSError:
+                capacities.append({"path": configured_path, "available_gib": 0, "error": "path unavailable"})
+                continue
+            if device in seen_devices:
+                continue
+            seen_devices.add(device)
+            capacities.append({"path": str(path), "available_gib": round(usage.free / 1024**3, 1), "total_gib": round(usage.total / 1024**3, 1)})
+        return capacities
+
+    def admission(self, candidate: dict[str, Any] | None = None) -> dict[str, Any]:
+        policy = self.capacity_policy()
+        limits = policy["admission_limits"]
+        reserve = policy["host_safety_reserve"]
+        running: list[dict[str, Any]] = []
+        reservation = {"cpu_cores": 0.0, "memory_mib": 0.0, "disk_gib": 0.0}
+        candidate_key = candidate.get("key") if candidate else None
+        for instance in self.instances.values():
+            if instance.get("key") == candidate_key:
+                continue
+            status = self.service_status(instance)
+            if status.get("active_state") in {"active", "activating", "reloading"}:
+                resources = instance.get("resources", {})
+                for field in reservation:
+                    reservation[field] += float(resources.get(field, 0))
+                running.append({"template_id": instance["template_id"], "instance_id": instance["instance_id"], "state": status.get("active_state")})
+        requested = candidate.get("resources", {}) if candidate else {}
+        projected = {field: reservation[field] + float(requested.get(field, 0)) for field in reservation}
+        reasons: list[str] = []
+        if projected["cpu_cores"] > float(limits["cpu_cores"]):
+            reasons.append(f"CPU reservation {projected['cpu_cores']:g} exceeds {limits['cpu_cores']:g} core admission limit")
+        if projected["memory_mib"] > float(limits["memory_mib"]):
+            reasons.append(f"memory reservation {projected['memory_mib']:g} MiB exceeds {limits['memory_mib']:g} MiB admission limit")
+        disks = self.disk_capacity(policy.get("disk_paths", []))
+        required_free = projected["disk_gib"] + float(reserve["disk_gib"])
+        for disk in disks:
+            if "error" in disk:
+                reasons.append(f"disk path {disk['path']} is unavailable")
+            elif disk["available_gib"] < required_free:
+                reasons.append(f"disk at {disk['path']} has {disk['available_gib']:g} GiB free; {required_free:g} GiB is required for reservations and safety reserve")
+        memory = self.memory_info()
+        swap_free = memory.get("SwapFree", 0)
+        if swap_free < float(reserve["swap_free_mib"]):
+            reasons.append(f"swap free {swap_free:g} MiB is below the {reserve['swap_free_mib']:g} MiB safety threshold")
+        return {
+            "allowed": not reasons,
+            "reasons": reasons,
+            "limits": limits,
+            "host_safety_reserve": reserve,
+            "running_instances": running,
+            "running_reservation": reservation,
+            "requested_reservation": requested,
+            "projected_reservation": projected,
+            "disk": disks,
+            "host_memory_available_mib": memory.get("MemAvailable", 0),
+            "host_swap_free_mib": swap_free,
+        }
+
+    def capacity_summary(self) -> dict[str, Any]:
+        return self.admission()
 
     def submit_lifecycle(self, action: str, template_id: Any, instance_id: Any, actor: str) -> dict[str, Any]:
         instance = self._registered(template_id, instance_id)
         status = self.service_status(instance)
         if action == "start" and status["active_state"] in {"active", "activating"}:
             return {"operation_id": None, "state": "already-running", "status": status}
+        admission = self.admission(instance)
+        if not admission["allowed"]:
+            raise ControllerError("start rejected: " + "; ".join(admission["reasons"]))
         operation_id = str(uuid.uuid4())
         operation = {
             "operation_id": operation_id,
@@ -227,6 +335,7 @@ class Controller:
             "instance_id": instance["instance_id"],
             "state": "queued",
             "queued_at": self.now(),
+            "admission": admission,
         }
         with self.lock:
             self.operations[operation_id] = operation
@@ -241,12 +350,18 @@ class Controller:
             operation["state"] = "starting" if operation["action"] == "start" else "restarting"
             operation["started_at"] = self.now()
         command = operation["action"]
-        result = self._systemctl(command, instance["unit"], "--no-block")
+        admission = self.admission(instance)
+        if not admission["allowed"]:
+            result = None
+            state, message = "failed", "start rejected after queue: " + "; ".join(admission["reasons"])
+        else:
+            result = self._systemctl(command, instance["unit"], "--no-block")
         timeout = min(max(int(instance.get("startup_timeout_seconds", 900)), 1), 1800)
         deadline = time.monotonic() + timeout
-        state = "failed"
-        message = "systemd rejected the request"
-        if result.returncode == 0:
+        if result is not None:
+            state = "failed"
+            message = "systemd rejected the request"
+        if result is not None and result.returncode == 0:
             while time.monotonic() < deadline:
                 status = self.service_status(instance)
                 if status["active_state"] == "active":
@@ -287,25 +402,31 @@ class Controller:
         if not isinstance(actor, str) or len(actor) > 256:
             raise ControllerError("invalid actor")
         template_id, instance_id = request.get("template_id"), request.get("instance_id")
-        if action == "list_catalog":
-            payload: Any = self.public_catalog()
-        elif action == "list_instances":
-            payload = list(self.instances.values())
-        elif action == "register_instance":
-            payload = self.register_instance(template_id, instance_id)
-        elif action in {"start", "restart"}:
-            payload = self.submit_lifecycle(action, template_id, instance_id, actor)
-        elif action == "status":
-            payload = self.service_status(self._registered(template_id, instance_id))
-        elif action == "health":
-            payload = [self.service_status(instance) for instance in self.instances.values()]
-        elif action == "logs":
-            payload = self.read_logs(self._registered(template_id, instance_id), request.get("tail", 50))
-        else:
-            operation_id = request.get("operation_id")
-            if not isinstance(operation_id, str) or operation_id not in self.operations:
-                raise ControllerError("operation is unknown or has expired")
-            payload = self.operations[operation_id]
+        try:
+            if action == "list_catalog":
+                payload: Any = self.public_catalog()
+            elif action == "list_instances":
+                payload = list(self.instances.values())
+            elif action == "register_instance":
+                payload = self.register_instance(template_id, instance_id)
+            elif action in {"start", "restart"}:
+                payload = self.submit_lifecycle(action, template_id, instance_id, actor)
+            elif action == "status":
+                payload = self.service_status(self._registered(template_id, instance_id))
+            elif action == "health":
+                payload = [self.service_status(instance) for instance in self.instances.values()]
+            elif action == "capacity":
+                payload = self.capacity_summary()
+            elif action == "logs":
+                payload = self.read_logs(self._registered(template_id, instance_id), request.get("tail", 50))
+            else:
+                operation_id = request.get("operation_id")
+                if not isinstance(operation_id, str) or operation_id not in self.operations:
+                    raise ControllerError("operation is unknown or has expired")
+                payload = self.operations[operation_id]
+        except ControllerError as exc:
+            self.audit({"action": action, "template_id": template_id, "instance_id": instance_id, "actor": actor, "peer_uid": peer_uid, "result": "rejected", "error": str(exc)})
+            raise
         self.audit({"action": action, "template_id": template_id, "instance_id": instance_id, "actor": actor, "peer_uid": peer_uid, "result": "accepted"})
         return {"ok": True, "result": payload}
 

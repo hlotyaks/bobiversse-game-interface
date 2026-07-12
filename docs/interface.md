@@ -9,7 +9,7 @@ The Compose deployment in [deploy/opt/game-server-interface/compose.yaml](../dep
 - Runs as the existing `game-interface-api` numeric UID/GID (`995:983`), the only UID accepted by the controller socket.
 - Uses a read-only root filesystem, drops every Linux capability, enables `no-new-privileges`, and uses a small `noexec,nosuid` temporary filesystem.
 - Has no Docker socket, privileged mode, host networking, host PID/IPC namespaces, or host filesystem mount beyond the read-only controller socket directory.
-- Uses a dedicated non-host Docker bridge network and publishes HTTP solely as `127.0.0.1:8080`.
+- Uses a dedicated non-host Docker bridge network and accepts HTTP only through the protected host Unix socket used by Tailscale Serve.
 - Is supervised by the root-owned [deploy/etc/systemd/system/game-server-interface.service](../deploy/etc/systemd/system/game-server-interface.service) unit.
 
 It must not be exposed directly on the LAN or Internet. Phase 5 will add the Tailscale Serve publishing configuration and trusted identity boundary.
@@ -20,15 +20,15 @@ Install after Phase 2 is active:
 
     sudo bash ./scripts/install-phase3.sh
 
-The installer copies root-owned assets to `/opt/game-server-interface`, builds the pinned Python base image, enables the service, and leaves the interface bound only to loopback.
+The installer copies root-owned assets to `/opt/game-server-interface`, builds the pinned Python base image, enables the service, and leaves the interface behind its protected Unix socket.
 
 Verify locally from the host:
 
     systemctl status game-server-interface.service
-    curl --fail http://127.0.0.1:8080/healthz
-    curl --fail http://127.0.0.1:8080/api/catalog
+    sudo curl --unix-socket /run/game-server-interface/web/interface.sock --fail http://localhost/healthz
+    sudo curl --unix-socket /run/game-server-interface/web/interface.sock --fail http://localhost/api/catalog
 
-The UI is intentionally not reachable through Tailscale yet. Do not add a firewall exception, router forwarding rule, or Tailscale Funnel configuration for port `8080`.
+The UI is intentionally not reachable through Tailscale yet. Do not add a firewall exception, router forwarding rule, or Tailscale Funnel configuration.
 
 ## API and controls
 
@@ -47,4 +47,4 @@ The UI shows registered and unregistered slots separately, exposes only catalog-
 
 ## Identity until Phase 5
 
-By default the API records the actor as `local-loopback` and ignores every browser-supplied actor header. This avoids accepting spoofed audit identity while the service is only locally available. Phase 5 may set `TRUSTED_ACTOR_HEADER=1` only after Tailscale Serve is configured to remove incoming identity headers and set the trusted user identity header itself.
+By default the API records the actor as `local-loopback` and ignores every browser-supplied actor header. This avoids accepting spoofed audit identity while the service is only locally available. Phase 5 may set `TRUSTED_ACTOR_HEADER=1` only after Tailscale Serve is configured to remove incoming identity headers and set `Tailscale-User-Login` itself.

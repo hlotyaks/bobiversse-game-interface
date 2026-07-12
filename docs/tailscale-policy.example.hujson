@@ -1,0 +1,15 @@
+// Apply this pattern in the tailnet admin console to grant all approved members
+// private HTTPS access to the game interface.
+// Keep SSH rules limited to administrator devices; do not use Funnel.
+{
+  "acls": [
+    // Existing administrator SSH rules remain separate and more restrictive.
+    {
+      "action": "accept",
+      "src": ["autogroup:member"],
+      "dst": ["100.84.161.38:443"],
+    },
+    // Add only a deployed instance's catalog-assigned game ports here.
+    // { "action": "accept", "src": ["autogroup:member"], "dst": ["100.84.161.38:2456-2457"] },
+  ],
+}

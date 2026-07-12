@@ -43,7 +43,8 @@ if command -v chattr >/dev/null; then
 fi
 
 systemctl daemon-reload
-systemctl enable --now game-server-interface-controller.service
+systemctl enable game-server-interface-controller.service
+systemctl restart game-server-interface-controller.service
 systemctl is-active --quiet game-server-interface-controller.service
 "${install_root}/validate_catalog.py" "${config_root}/catalog.yaml"
 printf 'Phase 2 controller is active. Socket: /run/game-server-interface/controller.sock\n'

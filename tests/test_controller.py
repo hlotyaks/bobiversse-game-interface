@@ -30,6 +30,7 @@ class ControllerContractTests(unittest.TestCase):
         self.assertEqual(instance["paths"]["instance_data"], "/srv/games/valheim-primary")
         self.assertEqual(instance["ports"], [{"protocol": "udp", "host": 2456, "container": 2456}, {"protocol": "udp", "host": 2457, "container": 2457}])
         self.assertEqual(instance["registration_state"], "pending-provisioning")
+        self.assertEqual(instance["resource_limits"]["systemd"]["MemoryMax"], "4096M")
 
     def test_duplicate_or_unknown_registration_is_rejected(self) -> None:
         self.controller.register_instance("enshrouded", "primary")
@@ -47,6 +48,15 @@ class ControllerContractTests(unittest.TestCase):
             MODULE.SECRET_PATTERN.sub(r"\1\2<redacted>", "token: abc123"),
             "token:<redacted>",
         )
+
+    def test_capacity_policy_rejects_excess_cpu_reservation(self) -> None:
+        catalog = MODULE.yaml.safe_load(self.catalog.read_text())
+        catalog["capacity_policy"]["admission_limits"]["cpu_cores"] = 1
+        self.catalog.write_text(MODULE.yaml.safe_dump(catalog))
+        candidate = self.controller.resolve_slot("valheim", "primary")
+        admission = self.controller.admission(candidate)
+        self.assertFalse(admission["allowed"])
+        self.assertTrue(any("CPU reservation" in reason for reason in admission["reasons"]))
 
 
 if __name__ == "__main__":

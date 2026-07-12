@@ -39,6 +39,7 @@ REQUIRED_TEMPLATE_FIELDS = {
     "deployment",
     "update_policy",
 }
+REQUIRED_CAPACITY_FIELDS = {"admission_limits", "host_safety_reserve", "disk_paths"}
 
 
 def fail(errors: list[str], message: str) -> None:
@@ -128,6 +129,30 @@ def validate_template(template_id: str, template: Any, all_ports: set[tuple[str,
                 fail(errors, f"{location}.deployment.{field}: must include '{{template}}' and '{{instance}}'")
 
 
+def validate_capacity_policy(policy: Any, errors: list[str]) -> None:
+    if not isinstance(policy, dict):
+        fail(errors, "capacity_policy: must be a mapping")
+        return
+    required(policy, REQUIRED_CAPACITY_FIELDS, "capacity_policy", errors)
+    limits = policy.get("admission_limits")
+    if not isinstance(limits, dict):
+        fail(errors, "capacity_policy.admission_limits: must be a mapping")
+    else:
+        for field in ("cpu_cores", "memory_mib"):
+            if not isinstance(limits.get(field), (int, float)) or limits[field] <= 0:
+                fail(errors, f"capacity_policy.admission_limits.{field}: must be a positive number")
+    reserve = policy.get("host_safety_reserve")
+    if not isinstance(reserve, dict):
+        fail(errors, "capacity_policy.host_safety_reserve: must be a mapping")
+    else:
+        for field in ("disk_gib", "swap_free_mib"):
+            if not isinstance(reserve.get(field), (int, float)) or reserve[field] < 0:
+                fail(errors, f"capacity_policy.host_safety_reserve.{field}: must be a non-negative number")
+    disk_paths = policy.get("disk_paths")
+    if not isinstance(disk_paths, list) or not disk_paths or not all(isinstance(path, str) and path.startswith("/") for path in disk_paths):
+        fail(errors, "capacity_policy.disk_paths: must be a non-empty list of absolute paths")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("catalog", type=Path, help="path to catalog.yaml")
@@ -145,6 +170,7 @@ def main() -> int:
         return 1
     if catalog.get("schema_version") != 1:
         fail(errors, "schema_version: must equal 1")
+    validate_capacity_policy(catalog.get("capacity_policy"), errors)
     path_templates = catalog.get("path_templates")
     if not isinstance(path_templates, dict):
         fail(errors, "path_templates: must be a mapping")

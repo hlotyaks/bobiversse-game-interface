@@ -20,7 +20,10 @@ Github Account
     `bobiverse.tail40344b.ts.net` and its Tailscale IPv4 address is
     `100.84.161.38`.
 - Tailscale SSH, subnet-route advertising, and exit-node advertising are not
-    enabled. No game ports are currently published.
+    enabled. Private Tailscale Serve HTTPS publishes the game interface at
+    `https://bobiverse.tail40344b.ts.net/` and proxies only to its protected
+    local Unix socket. Tailscale Funnel is not enabled. No game ports are
+    currently published.
 - The approved Windows administrator device is `groombridge34`, with Tailscale
     IPv4 address `100.126.180.63`. UFW allows TCP port 22 only from this device
     over Tailscale. Tailscale connectivity was verified in both directions on
@@ -81,8 +84,10 @@ private keys.
     `10.0.0.0/24`, and from the approved Windows Tailscale administrator
     devices: `100.126.180.63` (`groombridge34`) and `100.93.220.3` (`9950x3d`,
     `cbrinton`).
-- No game ports are currently allowed or published. Add only the documented
-    TCP/UDP ports for an active game when it is deployed.
+- No game ports are currently allowed or published. The stale Internet-wide
+    Enshrouded rules were removed before the interface was published. Add only
+    the documented TCP/UDP ports for an active game when it is deployed and
+    restrict them with Tailscale-aware Docker firewall rules.
 - Docker Engine `29.1.3` and Docker Compose `2.40.3` are installed. Published
     container ports must be restricted in Docker's `DOCKER-USER` chain (or
     equivalent nftables policy); UFW's ordinary inbound rule alone is

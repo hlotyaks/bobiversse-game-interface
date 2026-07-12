@@ -5,7 +5,9 @@ Requires=docker.service game-server-interface-controller.service
 
 [Service]
 Type=simple
+EnvironmentFile=-/etc/game-server-interface/interface.env
 WorkingDirectory=/opt/game-server-interface
+ExecStartPre=/usr/bin/install -d -o root -g game-interface-api -m 0770 /run/game-server-interface/web
 ExecStartPre=/usr/bin/docker compose --project-directory /opt/game-server-interface --file /opt/game-server-interface/compose.yaml config -q
 ExecStart=/usr/bin/docker compose --project-directory /opt/game-server-interface --file /opt/game-server-interface/compose.yaml up --no-color --remove-orphans
 ExecStop=/usr/bin/docker compose --project-directory /opt/game-server-interface --file /opt/game-server-interface/compose.yaml down

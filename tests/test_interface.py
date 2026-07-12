@@ -23,7 +23,7 @@ class InterfaceInputTests(unittest.TestCase):
         previous = MODULE.TRUSTED_ACTOR_HEADER
         MODULE.TRUSTED_ACTOR_HEADER = False
         try:
-            self.assertEqual(MODULE.request_actor({"X-Game-Interface-Actor": "spoofed"}), "local-loopback")
+            self.assertEqual(MODULE.request_actor({"Tailscale-User-Login": "spoofed@example.test"}), "local-loopback")
         finally:
             MODULE.TRUSTED_ACTOR_HEADER = previous
 
@@ -31,8 +31,8 @@ class InterfaceInputTests(unittest.TestCase):
         previous = MODULE.TRUSTED_ACTOR_HEADER
         MODULE.TRUSTED_ACTOR_HEADER = True
         try:
-            self.assertEqual(MODULE.request_actor({"X-Game-Interface-Actor": "alice@example.test"}), "alice@example.test")
-            self.assertEqual(MODULE.request_actor({"X-Game-Interface-Actor": "x" * 257}), "tailnet-unattributed")
+            self.assertEqual(MODULE.request_actor({"Tailscale-User-Login": "alice@example.test"}), "alice@example.test")
+            self.assertEqual(MODULE.request_actor({"Tailscale-User-Login": "x" * 257}), "tailnet-unattributed")
         finally:
             MODULE.TRUSTED_ACTOR_HEADER = previous
 

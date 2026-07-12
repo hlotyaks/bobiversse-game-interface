@@ -31,10 +31,10 @@ systemctl enable game-server-interface.service
 systemctl restart game-server-interface.service
 systemctl is-active --quiet game-server-interface.service
 for _ in $(seq 1 30); do
-    if curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null; then
+    if [[ -S /run/game-server-interface/web/interface.sock ]]; then
         break
     fi
     sleep 1
 done
-curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null
-printf 'Phase 3 interface is active on 127.0.0.1:8080. Do not publish it beyond loopback until Phase 5.\n'
+curl --unix-socket /run/game-server-interface/web/interface.sock --fail --silent http://localhost/healthz >/dev/null
+printf 'Phase 3 interface is active behind its protected Unix socket. Do not publish it until Phase 5.\n'

@@ -13,6 +13,21 @@ path_templates:
   log_file: /var/log/game-server-interface/{template}-{instance}.log
   service_account: game-{template}-{instance}
 
+# Derived from bobiverse's 8 logical CPUs, 30 GiB RAM, 8 GiB swap, and 80 GiB
+# free root filesystem on 2026-07-12. Review whenever host capacity changes.
+capacity_policy:
+  admission_limits:
+    cpu_cores: 6
+    memory_mib: 24576
+  host_safety_reserve:
+    disk_gib: 20
+    swap_free_mib: 1024
+  disk_paths:
+    - /
+    - /srv/games
+    - /srv/game-backups
+    - /var/lib/docker
+
 templates:
   valheim:
     display_name: Valheim
