@@ -1,0 +1,38 @@
+[Unit]
+Description=Restricted Game Server Interface Controller
+Documentation=file:///etc/game-server-interface/catalog.yaml
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStartPre=/usr/local/libexec/game-server-interface/validate_catalog.py /etc/game-server-interface/catalog.yaml
+ExecStart=/usr/local/libexec/game-server-interface/game_controller.py
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=game-server-interface
+RuntimeDirectoryMode=0750
+StateDirectory=game-server-interface
+StateDirectoryMode=0700
+LogsDirectory=game-server-interface
+LogsDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectSystem=strict
+ReadWritePaths=/run/game-server-interface /var/lib/game-server-interface /var/log/game-server-interface
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
