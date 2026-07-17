@@ -76,7 +76,7 @@ class ControllerContractTests(unittest.TestCase):
         original = self.controller._systemctl
         self.controller._systemctl = lambda *_args: subprocess.CompletedProcess(
             _args, 0,
-            "LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\nNRestarts=5\n",
+            "LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\nNRestarts=3\n",
             "",
         )
         try:
@@ -84,7 +84,7 @@ class ControllerContractTests(unittest.TestCase):
         finally:
             self.controller._systemctl = original
         self.assertTrue(status["crash_loop"])
-        self.assertEqual(status["restart_count_recent"], 5)
+        self.assertEqual(status["restart_count_recent"], 3)
 
 
 if __name__ == "__main__":

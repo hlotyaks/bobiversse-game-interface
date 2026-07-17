@@ -29,6 +29,7 @@ MAX_REQUEST_BYTES = 16_384
 MAX_LOG_LINES = 100
 OPERATION_RETENTION = timedelta(hours=24)
 CRASH_LOOP_RESTART_THRESHOLD = 5
+CRASH_LOOP_AUTO_RESTART_THRESHOLD = max(1, CRASH_LOOP_RESTART_THRESHOLD - 2)
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 SECRET_PATTERN = re.compile(r"(?i)(password|pass|secret|token|api[_-]?key|key)\s*([=:])\s*[^\s,;]+")
 WRITE_ACTIONS = {"register_instance", "start", "restart"}
@@ -305,9 +306,9 @@ class Controller:
             if not isinstance(restart_count, str) or not restart_count.isdigit():
                 restart_count = "0"
             details["restart_count_recent"] = int(restart_count)
-            details["crash_loop"] = (
-                details.get("active_state") == "failed"
-                and int(restart_count) >= CRASH_LOOP_RESTART_THRESHOLD
+            details["crash_loop"] = details.get("active_state") == "failed" and (
+                details.get("result") == "start-limit-hit"
+                or int(restart_count) >= CRASH_LOOP_AUTO_RESTART_THRESHOLD
             )
             if details["crash_loop"]:
                 details["last_failure_reason"] = "systemd restart limit reached; manual retry required"

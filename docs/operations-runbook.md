@@ -25,7 +25,7 @@ To run an immediate backup for Enshrouded without changing the running world:
 
 ## Crash loop and manual retry
 
-Game units allow at most five starts in five minutes. When the limit is reached, systemd stops automatic restart and the UI displays `CRASH LOOP` with a **Manual retry** action.
+Game units allow at most five starts in five minutes. When the limit is reached, systemd stops automatic restart and the UI displays `CRASH LOOP` with a **Manual retry** action. Systemd records three automatic restarts before rejecting the final starts at this limit.
 
 1. Preserve evidence first: `sudo journalctl -u game-enshrouded-primary.service -n 100 --no-pager`.
 2. Check disk, memory, and the most recent verified backup in the UI.
