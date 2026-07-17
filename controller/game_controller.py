@@ -37,6 +37,60 @@ class ControllerError(Exception):
     """An expected, safe error returned to the caller."""
 
 
+def resolve_slot_from_catalog(catalog: dict[str, Any], template_id: Any, instance_id: Any) -> dict[str, Any]:
+    """Resolve one catalog slot into its derived paths, ports, image, and limits.
+
+    This is the single source of truth for turning a (template, instance) pair into the
+    allowlisted, catalog-derived values. It is shared by the controller and by the
+    out-of-band instance renderer so both agree on ports, image digest, resource limits,
+    and paths. It performs no I/O and enforces the same invariants the controller relies on.
+    """
+    if not isinstance(template_id, str) or not ID_PATTERN.fullmatch(template_id):
+        raise ControllerError("invalid template ID")
+    if not isinstance(instance_id, str) or not ID_PATTERN.fullmatch(instance_id):
+        raise ControllerError("invalid instance ID")
+    template = catalog["templates"].get(template_id)
+    if not isinstance(template, dict):
+        raise ControllerError("unknown template")
+    if template.get("enabled") is not True:
+        raise ControllerError("template is disabled")
+    policy = template.get("instance_policy")
+    if not isinstance(policy, dict) or instance_id not in policy.get("allowed_instance_ids", []):
+        raise ControllerError("instance ID is not allowlisted for this template")
+    slot = policy.get("slots", {}).get(instance_id)
+    if not isinstance(slot, dict):
+        raise ControllerError("instance slot is invalid")
+    paths = catalog["path_templates"]
+    try:
+        resolved_paths = {name: value.format(template=template_id, instance=instance_id) for name, value in paths.items()}
+    except (AttributeError, KeyError, ValueError) as exc:
+        raise ControllerError("catalog path template is invalid") from exc
+    unit = resolved_paths.get("systemd_unit")
+    expected_unit = f"game-{template_id}-{instance_id}.service"
+    if unit != expected_unit:
+        raise ControllerError("catalog systemd unit is invalid")
+    resources = template.get("resources", {})
+    return {
+        "key": f"{template_id}:{instance_id}",
+        "template_id": template_id,
+        "instance_id": instance_id,
+        "display_name": template.get("display_name"),
+        "display_label": slot.get("display_label"),
+        "ports": slot.get("ports", []),
+        "unit": unit,
+        "image": template.get("image", {}).get("reference"),
+        "image_digest": template.get("image", {}).get("digest"),
+        "resources": resources,
+        "resource_limits": {
+            "compose": {"cpus": str(resources.get("cpu_cores")), "mem_limit": f"{resources.get('memory_mib')}m"},
+            "systemd": {"CPUQuota": f"{float(resources.get('cpu_cores', 0)) * 100:g}%", "MemoryMax": f"{resources.get('memory_mib')}M"},
+        },
+        "startup_timeout_seconds": template.get("startup", {}).get("timeout_seconds", 900),
+        "paths": resolved_paths,
+        "max_instances": policy.get("max_instances"),
+    }
+
+
 class Controller:
     def __init__(self, catalog_path: Path, state_path: Path, audit_path: Path) -> None:
         self.catalog_path = catalog_path
@@ -100,51 +154,7 @@ class Controller:
         return f"{template_id}:{instance_id}"
 
     def resolve_slot(self, template_id: Any, instance_id: Any) -> dict[str, Any]:
-        if not isinstance(template_id, str) or not ID_PATTERN.fullmatch(template_id):
-            raise ControllerError("invalid template ID")
-        if not isinstance(instance_id, str) or not ID_PATTERN.fullmatch(instance_id):
-            raise ControllerError("invalid instance ID")
-        catalog = self.catalog()
-        template = catalog["templates"].get(template_id)
-        if not isinstance(template, dict):
-            raise ControllerError("unknown template")
-        if template.get("enabled") is not True:
-            raise ControllerError("template is disabled")
-        policy = template.get("instance_policy")
-        if not isinstance(policy, dict) or instance_id not in policy.get("allowed_instance_ids", []):
-            raise ControllerError("instance ID is not allowlisted for this template")
-        slot = policy.get("slots", {}).get(instance_id)
-        if not isinstance(slot, dict):
-            raise ControllerError("instance slot is invalid")
-        paths = catalog["path_templates"]
-        try:
-            resolved_paths = {name: value.format(template=template_id, instance=instance_id) for name, value in paths.items()}
-        except (AttributeError, KeyError, ValueError) as exc:
-            raise ControllerError("catalog path template is invalid") from exc
-        unit = resolved_paths.get("systemd_unit")
-        expected_unit = f"game-{template_id}-{instance_id}.service"
-        if unit != expected_unit:
-            raise ControllerError("catalog systemd unit is invalid")
-        resources = template.get("resources", {})
-        return {
-            "key": self.instance_key(template_id, instance_id),
-            "template_id": template_id,
-            "instance_id": instance_id,
-            "display_name": template.get("display_name"),
-            "display_label": slot.get("display_label"),
-            "ports": slot.get("ports", []),
-            "unit": unit,
-            "image": template.get("image", {}).get("reference"),
-            "image_digest": template.get("image", {}).get("digest"),
-            "resources": resources,
-            "resource_limits": {
-                "compose": {"cpus": str(resources.get("cpu_cores")), "mem_limit": f"{resources.get('memory_mib')}m"},
-                "systemd": {"CPUQuota": f"{float(resources.get('cpu_cores', 0)) * 100:g}%", "MemoryMax": f"{resources.get('memory_mib')}M"},
-            },
-            "startup_timeout_seconds": template.get("startup", {}).get("timeout_seconds", 900),
-            "paths": resolved_paths,
-            "max_instances": policy.get("max_instances"),
-        }
+        return resolve_slot_from_catalog(self.catalog(), template_id, instance_id)
 
     def audit(self, event: dict[str, Any]) -> None:
         record = {"timestamp": self.now(), **event}

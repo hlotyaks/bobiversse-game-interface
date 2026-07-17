@@ -11,7 +11,8 @@ path_templates:
   compose_file: /etc/game-server-interface/instances/{template}-{instance}/compose.yaml
   systemd_unit: game-{template}-{instance}.service
   log_file: /var/log/game-server-interface/{template}-{instance}.log
-  service_account: game-{template}-{instance}
+  # Matches the account that create-game-account provisions (data dir is /srv/games/<account>).
+  service_account: "{template}-{instance}"
 
 # Derived from bobiverse's 8 logical CPUs, 30 GiB RAM, 8 GiB swap, and 80 GiB
 # free root filesystem on 2026-07-12. Review whenever host capacity changes.

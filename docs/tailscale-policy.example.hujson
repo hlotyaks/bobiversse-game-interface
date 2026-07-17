@@ -10,6 +10,11 @@
       "dst": ["100.84.161.38:443"],
     },
     // Add only a deployed instance's catalog-assigned game ports here.
+    // Without a grant here, Tailscale drops the game UDP traffic even though the port is
+    // published and the host firewall allows it -- the web UI still works because 443 is granted.
+    // Enshrouded (enshrouded-primary), game + query UDP ports:
+    { "action": "accept", "src": ["autogroup:member"], "dst": ["100.84.161.38:15636-15637"] },
+    // Valheim example (add when that instance is deployed):
     // { "action": "accept", "src": ["autogroup:member"], "dst": ["100.84.161.38:2456-2457"] },
   ],
 }
