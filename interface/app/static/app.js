@@ -45,9 +45,15 @@ function render() {
       const row = document.createElement('div');
       row.className = 'instance';
       const state = record?.status?.active_state || (record ? 'pending' : 'not registered');
+      const crashLoop = record?.status?.crash_loop === true;
       const ports = record?.instance?.ports?.map((port) => `${port.protocol.toUpperCase()} ${port.host}`).join(' · ') || 'Ports assigned when registered';
       const usage = record?.status?.memory_current_mib !== undefined ? `<br>Observed: ${record.status.memory_current_mib} MiB memory · ${Math.round(Number(record.status.cpu_usage_nsec || 0) / 1e9)}s CPU time` : '';
-      row.innerHTML = `<div class="instance-row"><span class="instance-name">${instanceId}</span><span class="badge ${state === 'active' ? 'healthy' : state === 'failed' ? 'failed' : 'idle'}">${state}</span></div><p class="meta">${record ? `${ports}<br>Unit: ${record.status.unit}${usage}` : 'This slot is not registered yet.'}</p>`;
+      const backup = record?.status?.backup || {};
+      const backupDetail = record ? backup.latest_timestamp
+        ? `<br>Backup: ${backup.latest_timestamp} · ${backup.verification_passed ? 'verified' : 'verification failed'}`
+        : '<br>Backup: no verified automated backup yet' : '';
+      const crashDetail = crashLoop ? `<br><strong>Crash loop:</strong> ${record.status.last_failure_reason || 'manual retry required'}` : '';
+      row.innerHTML = `<div class="instance-row"><span class="instance-name">${instanceId}</span><span class="badge ${crashLoop || state === 'failed' ? 'failed' : state === 'active' ? 'healthy' : 'idle'}">${crashLoop ? 'CRASH LOOP' : state}</span></div><p class="meta">${record ? `${ports}<br>Unit: ${record.status.unit}${usage}${backupDetail}${crashDetail}` : 'This slot is not registered yet.'}</p>`;
       const actions = document.createElement('div');
       actions.className = 'actions';
       const registering = !record;
@@ -55,8 +61,8 @@ function render() {
       const capacityReason = capacityBlockReason(game, record, state);
       const capacityAllowed = !capacityReason;
       if (!capacityAllowed) row.querySelector('.meta').textContent += ` Resource policy: ${capacityReason}.`;
-      actions.append(button(registering ? 'Register slot' : 'Start', registering ? 'secondary' : '', () => registering ? register(game.template_id, instanceId) : lifecycle('start', game.template_id, instanceId), !game.enabled || starting || !capacityAllowed));
-      if (record) actions.append(button('Restart', 'secondary', () => lifecycle('restart', game.template_id, instanceId), !game.enabled || starting));
+      actions.append(button(registering ? 'Register slot' : crashLoop ? 'Manual retry' : 'Start', registering ? 'secondary' : '', () => registering ? register(game.template_id, instanceId) : lifecycle('start', game.template_id, instanceId), !game.enabled || starting || !capacityAllowed));
+      if (record && !crashLoop) actions.append(button('Restart', 'secondary', () => lifecycle('restart', game.template_id, instanceId), !game.enabled || starting));
       row.append(actions);
       list.append(row);
     });

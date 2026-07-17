@@ -117,6 +117,8 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
             payload = self.controller("list_catalog")
         elif path == "/api/capacity":
             payload = self.controller("capacity")
+        elif path == "/api/backup-status":
+            payload = self.controller("backup_status")
         elif path == "/api/instances":
             instances = self.controller("list_instances")
             if not instances:

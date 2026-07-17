@@ -124,6 +124,8 @@ def render_unit(resolved: dict[str, Any]) -> str:
 Description={resolved['display_name']} game server ({template}-{instance})
 After=docker.service
 Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

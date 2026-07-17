@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +58,28 @@ class ControllerContractTests(unittest.TestCase):
         admission = self.controller.admission(candidate)
         self.assertFalse(admission["allowed"])
         self.assertTrue(any("CPU reservation" in reason for reason in admission["reasons"]))
+
+    def test_operations_persist_across_controller_restart(self) -> None:
+        operation = {"operation_id": "test-operation", "state": "healthy", "completed_at": self.controller.now()}
+        self.controller.operations[operation["operation_id"]] = operation
+        self.controller._save_operations()
+        restored = MODULE.Controller(self.catalog, self.controller.state_path, self.controller.audit_path)
+        self.assertEqual(restored.operations["test-operation"]["state"], "healthy")
+
+    def test_failed_service_with_restart_limit_is_crash_loop(self) -> None:
+        instance = self.controller.register_instance("enshrouded", "primary")
+        original = self.controller._systemctl
+        self.controller._systemctl = lambda *_args: subprocess.CompletedProcess(
+            _args, 0,
+            "LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\nNRestarts=5\n",
+            "",
+        )
+        try:
+            status = self.controller.service_status(instance)
+        finally:
+            self.controller._systemctl = original
+        self.assertTrue(status["crash_loop"])
+        self.assertEqual(status["restart_count_recent"], 5)
 
 
 if __name__ == "__main__":
