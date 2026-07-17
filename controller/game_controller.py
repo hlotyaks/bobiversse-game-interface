@@ -233,12 +233,18 @@ class Controller:
         catalog = self.catalog()
         output = []
         for template_id, template in sorted(catalog["templates"].items()):
+            connection = template.get("connection", {})
+            public_connection = {
+                "hostname": connection.get("hostname"),
+                "protocol": connection.get("protocol"),
+            } if isinstance(connection, dict) else {}
             output.append({
                 "template_id": template_id,
                 "display_name": template.get("display_name"),
                 "description": template.get("description"),
                 "enabled": template.get("enabled") is True,
                 "supported_players": template.get("supported_players"),
+                "connection": public_connection,
                 "resources": template.get("resources", {}),
                 "instance_ids": template.get("instance_policy", {}).get("allowed_instance_ids", []),
             })

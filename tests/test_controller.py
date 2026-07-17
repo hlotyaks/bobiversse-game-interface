@@ -33,6 +33,11 @@ class ControllerContractTests(unittest.TestCase):
         self.assertEqual(instance["registration_state"], "pending-provisioning")
         self.assertEqual(instance["resource_limits"]["systemd"]["MemoryMax"], "4096M")
 
+    def test_public_catalog_exposes_connection_without_password_guidance(self) -> None:
+        enshrouded = next(item for item in self.controller.public_catalog() if item["template_id"] == "enshrouded")
+        self.assertEqual(enshrouded["connection"], {"hostname": "bobiverse.tail40344b.ts.net", "protocol": "udp"})
+        self.assertNotIn("password_guidance", enshrouded["connection"])
+
     def test_duplicate_or_unknown_registration_is_rejected(self) -> None:
         self.controller.register_instance("enshrouded", "primary")
         with self.assertRaises(MODULE.ControllerError):

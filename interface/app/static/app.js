@@ -54,6 +54,17 @@ function render() {
         : '<br>Backup: no verified automated backup yet' : '';
       const crashDetail = crashLoop ? `<br><strong>Crash loop:</strong> ${record.status.last_failure_reason || 'manual retry required'}` : '';
       row.innerHTML = `<div class="instance-row"><span class="instance-name">${instanceId}</span><span class="badge ${crashLoop || state === 'failed' ? 'failed' : state === 'active' ? 'healthy' : 'idle'}">${crashLoop ? 'CRASH LOOP' : state}</span></div><p class="meta">${record ? `${ports}<br>Unit: ${record.status.unit}${usage}${backupDetail}${crashDetail}` : 'This slot is not registered yet.'}</p>`;
+      const address = connectionAddress(game, record);
+      if (address) {
+        const connection = document.createElement('div');
+        connection.className = 'connection';
+        const label = document.createElement('span');
+        label.textContent = 'Connect';
+        const value = document.createElement('code');
+        value.textContent = address;
+        connection.append(label, value, button('Copy address', 'secondary', () => copyConnection(address)));
+        row.querySelector('.meta').after(connection);
+      }
       const actions = document.createElement('div');
       actions.className = 'actions';
       const registering = !record;
@@ -68,6 +79,26 @@ function render() {
     });
     catalogElement.append(card);
   });
+}
+
+function connectionAddress(game, record) {
+  const hostname = game.connection?.hostname;
+  const ports = record?.instance?.ports || [];
+  const gamePort = ports
+    .filter((port) => port.protocol === 'udp' && Number.isInteger(Number(port.host)))
+    .map((port) => Number(port.host))
+    .sort((left, right) => left - right)[0];
+  return typeof hostname === 'string' && hostname && gamePort ? `${hostname}:${gamePort}` : '';
+}
+
+async function copyConnection(address) {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable');
+    await navigator.clipboard.writeText(address);
+    showNotice(`Copied connection address: ${address}`);
+  } catch (_error) {
+    showNotice(`Copy is unavailable. Use: ${address}`, true);
+  }
 }
 
 function capacityBlockReason(game, record, state) {
