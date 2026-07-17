@@ -1,4 +1,6 @@
-# Operations runbook
+# Phase 6+ operations runbook
+
+> **Status: deployed.** These procedures describe the currently installed reliability, backup, and operational controls.
 
 These procedures are root-only unless stated otherwise. Keep the catalog, deployed files, and tailnet policy under version control; do not place passwords, tokens, or save archives in the repository.
 

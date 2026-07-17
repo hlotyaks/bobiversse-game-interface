@@ -12,7 +12,7 @@ The Compose deployment in [deploy/opt/game-server-interface/compose.yaml](../dep
 - Uses a dedicated non-host Docker bridge network and accepts HTTP only through the protected host Unix socket used by Tailscale Serve.
 - Is supervised by the root-owned [deploy/etc/systemd/system/game-server-interface.service](../deploy/etc/systemd/system/game-server-interface.service) unit.
 
-It must not be exposed directly on the LAN or Internet. Phase 5 will add the Tailscale Serve publishing configuration and trusted identity boundary.
+It is not exposed directly on the LAN or Internet. Phase 5 publishes it through private Tailscale Serve HTTPS only; Tailscale Funnel remains disabled.
 
 ## Install and verify
 
@@ -28,7 +28,7 @@ Verify locally from the host:
     sudo curl --unix-socket /run/game-server-interface/web/interface.sock --fail http://localhost/healthz
     sudo curl --unix-socket /run/game-server-interface/web/interface.sock --fail http://localhost/api/catalog
 
-The UI is intentionally not reachable through Tailscale yet. Do not add a firewall exception, router forwarding rule, or Tailscale Funnel configuration.
+The private dashboard is available through `https://bobiverse.tail40344b.ts.net/` to approved tailnet members. Do not add a firewall exception, router forwarding rule, or Tailscale Funnel configuration.
 
 ## API and controls
 
@@ -37,14 +37,16 @@ The browser only reaches these same-origin routes:
 | Route | Function |
 | --- | --- |
 | `GET /api/catalog` | Safe template summary. |
+| `GET /api/capacity` | Current capacity reservations and admission limits. |
+| `GET /api/backup-status` | Latest backup verification summary. |
 | `GET /api/instances` | Registered slots with live `systemd` status. |
 | `POST /api/instances` | Registers a catalog-defined slot only. |
 | `POST /api/actions/start` | Queues an asynchronous start. |
 | `POST /api/actions/restart` | Queues an asynchronous restart. |
 | `GET /api/operations/<id>` | Reads asynchronous operation state. |
 
-The UI shows registered and unregistered slots separately, exposes only catalog-provided ports, disables lifecycle actions while services transition, and asks for confirmation before registration, start, or restart. A registered slot remains `pending-provisioning` until a later root-reviewed workflow creates its exact service unit and secret file; the controller safely rejects a start of an absent unit.
+The UI shows registered and unregistered slots separately, exposes only catalog-provided ports, displays a copyable catalog-derived connection address for a registered game, and shows backup status and observed resource use. It disables lifecycle actions while services transition and asks for confirmation before registration, start, or restart. A registered slot remains `pending-provisioning` until a later root-reviewed workflow creates its exact service unit and secret file; the controller safely rejects a start of an absent unit.
 
-## Identity until Phase 5
+## Tailnet identity
 
-By default the API records the actor as `local-loopback` and ignores every browser-supplied actor header. This avoids accepting spoofed audit identity while the service is only locally available. Phase 5 may set `TRUSTED_ACTOR_HEADER=1` only after Tailscale Serve is configured to remove incoming identity headers and set `Tailscale-User-Login` itself.
+By default the API records the actor as `local-loopback` and ignores every browser-supplied actor header. In the deployed private Serve configuration, Phase 5 sets `TRUSTED_ACTOR_HEADER=1` only after Tailscale Serve is configured to remove incoming identity headers and set `Tailscale-User-Login` itself.

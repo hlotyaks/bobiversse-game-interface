@@ -1,5 +1,9 @@
 # Phase 7 validation
 
+> **Last validated:** 2026-07-17
+
+Remaining external-device and maintenance-window work is tracked in [features.md](features.md).
+
 ## Test boundary
 
 All destructive lifecycle validation targets only `enshrouded:secondary` (`game-enshrouded-secondary.service`, UDP `15640–15641`, and `/srv/games/enshrouded-secondary`). The active `enshrouded:primary` instance is treated as a production pilot and is checked only for continued availability.
