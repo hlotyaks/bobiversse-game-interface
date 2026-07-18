@@ -1,0 +1,32 @@
+# Root-owned usage-metering / cost-sharing configuration (Stage 1: dry-run, no money).
+# Consumed by tools/billing.py to turn a presence ledger into per-user playtime and a
+# hypothetical bill. Contains no secrets and no payment credentials -- those belong to a
+# later Stage 2 and must never be stored here. See docs/usage-metering.md.
+schema_version: 1
+currency: USD
+
+# Per-instance run-cost used to compute the dry-run bill. On the current free bobiverse host
+# there is no real cloud charge, so this is a nominal rate only used to test-fly the model and
+# see how the numbers feel. Replace with the real elastic hourly rate when/if moving to cloud
+# (see docs/cloud-hosting-cost-analysis.md).
+instances:
+  enshrouded-primary:
+    run_cost_per_hour: 0.18
+  enshrouded-secondary:
+    run_cost_per_hour: 0.18
+
+# Group-size multiplier m(n): players present -> multiplier applied to the split cost. Solo
+# (>1) carries a premium; larger groups (<1) are subsidized. Any group size beyond the largest
+# key uses default_multiplier as the floor. This is the tuning dial for the group-play incentive.
+multiplier_schedule:
+  1: 1.5
+  2: 1.2
+  3: 1.0
+  4: 0.85
+default_multiplier: 0.75
+
+# How presence is sampled and how far apart two samples may be before the gap is treated as
+# meter downtime (not counted as continuous play). Keep sample_interval_seconds in sync with
+# the presence meter's cadence.
+sample_interval_seconds: 60
+max_gap_seconds: 150
