@@ -13,6 +13,8 @@ services:
       INTERFACE_SOCKET: /run/game-server-interface/web/interface.sock
       # Phase 5 sets this from a root-owned systemd environment file.
       TRUSTED_ACTOR_HEADER: "${TRUSTED_ACTOR_HEADER:-0}"
+      # Root-owned, comma-separated Tailscale login allowlist for game-request exports.
+      GAME_INTERFACE_ADMIN_LOGINS: "${GAME_INTERFACE_ADMIN_LOGINS:-}"
     volumes:
       - type: bind
         source: /run/game-server-interface/controller.sock

@@ -1,0 +1,21 @@
+[Unit]
+Description=Create and verify Game Server Interface backups
+Documentation=file:///etc/game-server-interface/catalog.yaml
+After=game-server-interface-controller.service
+Requires=game-server-interface-controller.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/libexec/game-server-interface/backup_scheduler.py
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/game-server-interface /srv/games /srv/game-backups

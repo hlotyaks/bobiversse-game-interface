@@ -12,14 +12,19 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 CONTROLLER_SOCKET = os.environ.get("CONTROLLER_SOCKET", "/run/game-server-interface/controller.sock")
 INTERFACE_SOCKET = os.environ.get("INTERFACE_SOCKET", "")
 TRUSTED_ACTOR_HEADER = os.environ.get("TRUSTED_ACTOR_HEADER", "0") == "1"
+GAME_INTERFACE_ADMIN_LOGINS = frozenset(
+    item.strip() for item in os.environ.get("GAME_INTERFACE_ADMIN_LOGINS", "").split(",") if item.strip()
+)
 MAX_BODY_BYTES = 16_384
 MAX_CONTROLLER_RESPONSE_BYTES = 1_048_576
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+STEAM_APP_ID_PATTERN = re.compile(r"^(?:https://store\.steampowered\.com/app/)?([1-9][0-9]{0,9})(?:/[^?#]*)?/?(?:[?#].*)?$")
+MAX_PURPOSE_LENGTH = 500
 STATIC_ROOT = Path(__file__).parent / "static"
 
 
@@ -61,6 +66,51 @@ def request_actor(headers: Any) -> str:
 
 def valid_id(value: Any) -> bool:
     return isinstance(value, str) and bool(ID_PATTERN.fullmatch(value))
+
+
+def steam_app_id(value: Any) -> int | None:
+    if not isinstance(value, str) or len(value) > 512:
+        return None
+    match = STEAM_APP_ID_PATTERN.fullmatch(value.strip())
+    if match is None:
+        return None
+    app_id = int(match.group(1))
+    return app_id if app_id <= 2_147_483_647 else None
+
+
+def game_request_params(body: dict[str, Any]) -> dict[str, Any] | None:
+    source = body.get("steam_url")
+    requested_slug = body.get("requested_slug")
+    purpose = body.get("purpose", "")
+    app_id = steam_app_id(source)
+    if app_id is None or not valid_id(requested_slug):
+        return None
+    if not isinstance(purpose, str) or len(purpose) > MAX_PURPOSE_LENGTH or any(character in purpose for character in "\r\n"):
+        return None
+    return {"steam_app_id": app_id, "steam_url": f"https://store.steampowered.com/app/{app_id}/", "requested_slug": requested_slug, "purpose": purpose.strip()}
+
+
+def is_game_administrator(actor: str) -> bool:
+    return TRUSTED_ACTOR_HEADER and actor not in {"local-loopback", "tailnet-unattributed"} and actor in GAME_INTERFACE_ADMIN_LOGINS
+
+
+def log_request_params(path: str) -> dict[str, Any] | None:
+    query = parse_qs(urlparse(path).query, keep_blank_values=True)
+    template_ids = query.get("template_id", [])
+    instance_ids = query.get("instance_id", [])
+    tails = query.get("tail", [])
+    if len(template_ids) != 1 or len(instance_ids) != 1 or len(tails) > 1:
+        return None
+    template_id, instance_id = template_ids[0], instance_ids[0]
+    if not valid_id(template_id) or not valid_id(instance_id):
+        return None
+    payload: dict[str, Any] = {"template_id": template_id, "instance_id": instance_id}
+    if tails:
+        try:
+            payload["tail"] = int(tails[0])
+        except ValueError:
+            return None
+    return payload
 
 
 class InterfaceHandler(SimpleHTTPRequestHandler):
@@ -115,8 +165,12 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/catalog":
             payload = self.controller("list_catalog")
+        elif path == "/api/game-requests/policy":
+            payload = {"result": {"allowed": is_game_administrator(request_actor(self.headers)), "max_purpose_length": MAX_PURPOSE_LENGTH}}
         elif path == "/api/capacity":
             payload = self.controller("capacity")
+        elif path == "/api/backup-status":
+            payload = self.controller("backup_status")
         elif path == "/api/instances":
             instances = self.controller("list_instances")
             if not instances:
@@ -130,6 +184,12 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
                     return
                 records.append({"instance": instance, "status": status["result"]})
             payload = {"result": records}
+        elif path == "/api/logs":
+            params = log_request_params(self.path)
+            if params is None:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid log request"})
+                return
+            payload = self.controller("logs", **params)
         elif path.startswith("/api/operations/"):
             operation_id = path.removeprefix("/api/operations/")
             payload = self.controller("operation_status", operation_id=operation_id)
@@ -146,22 +206,36 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON request"})
             return
-        template_id, instance_id = body.get("template_id"), body.get("instance_id")
-        if not valid_id(template_id) or not valid_id(instance_id):
-            self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid template or instance ID"})
-            return
-        if path == "/api/instances":
-            payload = self.controller("register_instance", template_id=template_id, instance_id=instance_id)
+        if path == "/api/game-requests":
+            actor = request_actor(self.headers)
+            if not is_game_administrator(actor):
+                self.send_json(HTTPStatus.FORBIDDEN, {"error": "game requests require an authorized tailnet administrator"})
+                return
+            params = game_request_params(body)
+            if params is None:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": "provide a Steam Store URL or app ID, a valid catalog slug, and a short single-line purpose"})
+                return
+            payload = self.controller("create_game_request", steam_app_id=params["steam_app_id"], requested_slug=params["requested_slug"])
             status = HTTPStatus.CREATED
-        elif path == "/api/actions/start":
-            payload = self.controller("start", template_id=template_id, instance_id=instance_id)
-            status = HTTPStatus.ACCEPTED
-        elif path == "/api/actions/restart":
-            payload = self.controller("restart", template_id=template_id, instance_id=instance_id)
-            status = HTTPStatus.ACCEPTED
+            if payload:
+                payload["result"] = {**payload["result"], **params, "schema_version": 1, "requester": actor}
         else:
-            self.send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
-            return
+            template_id, instance_id = body.get("template_id"), body.get("instance_id")
+            if not valid_id(template_id) or not valid_id(instance_id):
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid template or instance ID"})
+                return
+            if path == "/api/instances":
+                payload = self.controller("register_instance", template_id=template_id, instance_id=instance_id)
+                status = HTTPStatus.CREATED
+            elif path == "/api/actions/start":
+                payload = self.controller("start", template_id=template_id, instance_id=instance_id)
+                status = HTTPStatus.ACCEPTED
+            elif path == "/api/actions/restart":
+                payload = self.controller("restart", template_id=template_id, instance_id=instance_id)
+                status = HTTPStatus.ACCEPTED
+            else:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
         if payload:
             self.send_json(status, payload)
 

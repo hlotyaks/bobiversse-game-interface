@@ -60,7 +60,10 @@ fi
 
 status=0
 for port in "$@"; do
-    listen=$(ss -ulnH "( sport = :${port} )" 2>/dev/null | awk '{print $5}')
+    # `ss` prints the local address in column 5 when the process column is
+    # absent and column 6 when it is present; use the penultimate address
+    # field rather than the peer address (which is normally 0.0.0.0:* for UDP).
+    listen=$(ss -ulnH "( sport = :${port} )" 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i ~ /:[0-9]+$/) { print $i; break }}')
     if [[ -z ${listen} ]]; then
         echo "NOTE  udp/${port}: nothing is listening yet (start the instance first)."
         continue
