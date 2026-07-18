@@ -28,6 +28,18 @@ The image pins target Linux/amd64 manifests resolved on 2026-07-12. They are rev
 
 Only root may modify the deployed catalog. The web interface and game service accounts must have read-only access if they ever need it; the controller remains the only component allowed to control a registered service.
 
+## New-game request workflow
+
+The dashboard's **Add new game** control does not add a catalog template or create a server. It is available only when `TRUSTED_ACTOR_HEADER=1` and the caller's exact `Tailscale-User-Login` value appears in the root-provided `GAME_INTERFACE_ADMIN_LOGINS` comma-separated allowlist. It exports a bounded JSON request containing a canonical Steam Store app URL, requested catalog slug, short purpose, requester, and timestamp.
+
+Run the following from an administrator workstation or another controlled operator environment, never from the deployed interface container:
+
+        python3 tools/fetch_steam_metadata.py --input game-request-example-123.json --output-dir review/example
+
+The tool uses Steam's public Store app-details response only to prepare advisory metadata and a disabled, non-deployable YAML skeleton. It does not choose an image, digest, ports, resources, credentials, health check, persistent paths, or renderer. Do not commit the request's free-text purpose unless it is appropriate for repository history.
+
+The resulting pull request must contain the completed catalog entry, a reviewed Linux/amd64 immutable image digest, a game-specific renderer adapter and tests, and updates to provisioning/backup/firewall documentation. Keep the template disabled until root provisioning and the controlled rollout checks succeed.
+
 ## Instance registration contract
 
 A future controller must reject a registration unless all of the following are true:

@@ -27,7 +27,11 @@
         <p class="eyebrow">CATALOG</p>
         <h2>Available worlds</h2>
       </div>
-      <button class="button secondary" id="refresh" type="button">Refresh status</button>
+      <div class="refresh-controls">
+        <p class="refresh-status" id="refresh-status" aria-live="polite">Automatic updates starting…</p>
+        <button class="button secondary" id="add-game" type="button" hidden>Add new game</button>
+        <button class="button secondary" id="refresh" type="button">Refresh status</button>
+      </div>
     </section>
     <section class="capacity" id="capacity" aria-live="polite"></section>
     <section class="grid" id="catalog" aria-live="polite"></section>
@@ -54,6 +58,24 @@
       <menu>
         <button class="button secondary" value="cancel">Cancel</button>
         <button class="button danger" id="dialog-confirm" value="confirm">Continue</button>
+      </menu>
+    </form>
+  </dialog>
+  <dialog id="game-request-dialog" aria-labelledby="game-request-title">
+    <form id="game-request-form">
+      <p class="eyebrow">CATALOG REQUEST</p>
+      <h2 id="game-request-title">Request a new game</h2>
+      <p class="dialog-copy">This exports a review request only. It cannot deploy, provision, register, or start a server.</p>
+      <label for="steam-url">Steam Store URL or app ID</label>
+      <input id="steam-url" name="steam_url" type="text" inputmode="url" autocomplete="off" required maxlength="512" placeholder="https://store.steampowered.com/app/…">
+      <label for="requested-slug">Requested catalog slug</label>
+      <input id="requested-slug" name="requested_slug" type="text" autocomplete="off" required maxlength="63" pattern="[a-z][a-z0-9-]{0,62}" placeholder="game-name">
+      <label for="request-purpose">Purpose <span>(optional)</span></label>
+      <textarea id="request-purpose" name="purpose" maxlength="500" rows="3" placeholder="Short reason for this request"></textarea>
+      <p class="form-error" id="game-request-error" role="alert" hidden></p>
+      <menu>
+        <button class="button secondary" type="button" id="game-request-cancel">Cancel</button>
+        <button class="button" type="submit">Download request</button>
       </menu>
     </form>
   </dialog>

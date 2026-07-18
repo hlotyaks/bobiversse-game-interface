@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +27,13 @@ import yaml
 
 MAX_REQUEST_BYTES = 16_384
 MAX_LOG_LINES = 100
+OPERATION_RETENTION = timedelta(hours=24)
+CRASH_LOOP_RESTART_THRESHOLD = 5
+CRASH_LOOP_AUTO_RESTART_THRESHOLD = max(1, CRASH_LOOP_RESTART_THRESHOLD - 2)
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 SECRET_PATTERN = re.compile(r"(?i)(password|pass|secret|token|api[_-]?key|key)\s*([=:])\s*[^\s,;]+")
 WRITE_ACTIONS = {"register_instance", "start", "restart"}
-READ_ACTIONS = {"list_catalog", "list_instances", "status", "health", "logs", "operation_status", "capacity"}
+READ_ACTIONS = {"list_catalog", "list_instances", "status", "health", "logs", "operation_status", "capacity", "backup_status"}
 
 
 class ControllerError(Exception):
@@ -96,10 +99,13 @@ class Controller:
         self.catalog_path = catalog_path
         self.state_path = state_path
         self.audit_path = audit_path
+        self.operations_path = state_path.with_name("operations.json")
+        self.backup_status_path = state_path.with_name("backup_status.json")
         self.lock = threading.RLock()
         self.operations: dict[str, dict[str, Any]] = {}
         self._ensure_paths()
         self._load_state()
+        self._load_operations()
 
     @staticmethod
     def now() -> str:
@@ -138,6 +144,61 @@ class Controller:
             if os.path.exists(temporary_name):
                 os.unlink(temporary_name)
 
+    def _save_operations(self) -> None:
+        self._atomic_json_write(self.operations_path, {"schema_version": 1, "operations": self.operations})
+
+    def _atomic_json_write(self, path: Path, payload: dict[str, Any]) -> None:
+        encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f"{path.stem}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+                temporary.write(encoded)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.chmod(temporary_name, 0o600)
+            os.replace(temporary_name, path)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _load_operations(self) -> None:
+        if not self.operations_path.exists():
+            return
+        try:
+            payload = json.loads(self.operations_path.read_text(encoding="utf-8"))
+            operations = payload.get("operations", {})
+            if not isinstance(operations, dict):
+                raise ValueError("operations is not a mapping")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot load operation state: {exc}") from exc
+        changed = False
+        cutoff = datetime.now(UTC) - OPERATION_RETENTION
+        for operation_id, operation in operations.items():
+            if not isinstance(operation_id, str) or not isinstance(operation, dict):
+                changed = True
+                continue
+            completed_at = self._parse_timestamp(operation.get("completed_at"))
+            if completed_at and completed_at < cutoff:
+                changed = True
+                continue
+            if operation.get("state") in {"queued", "starting", "restarting"}:
+                operation["state"] = "failed"
+                operation["completed_at"] = self.now()
+                operation["message"] = "controller restarted before the operation completed"
+                changed = True
+            self.operations[operation_id] = operation
+        if changed:
+            self._save_operations()
+
     def catalog(self) -> dict[str, Any]:
         try:
             catalog = yaml.safe_load(self.catalog_path.read_text(encoding="utf-8"))
@@ -173,12 +234,18 @@ class Controller:
         catalog = self.catalog()
         output = []
         for template_id, template in sorted(catalog["templates"].items()):
+            connection = template.get("connection", {})
+            public_connection = {
+                "hostname": connection.get("hostname"),
+                "protocol": connection.get("protocol"),
+            } if isinstance(connection, dict) else {}
             output.append({
                 "template_id": template_id,
                 "display_name": template.get("display_name"),
                 "description": template.get("description"),
                 "enabled": template.get("enabled") is True,
                 "supported_players": template.get("supported_players"),
+                "connection": public_connection,
                 "resources": template.get("resources", {}),
                 "instance_ids": template.get("instance_policy", {}).get("allowed_instance_ids", []),
             })
@@ -205,6 +272,14 @@ class Controller:
             self._save_state()
         return self.instances[key]
 
+    def create_game_request(self, steam_app_id: Any, requested_slug: Any) -> dict[str, Any]:
+        """Audit a bounded proposal without creating deployable host state."""
+        if not isinstance(steam_app_id, int) or isinstance(steam_app_id, bool) or not 1 <= steam_app_id <= 2_147_483_647:
+            raise ControllerError("invalid Steam app ID")
+        if not isinstance(requested_slug, str) or not ID_PATTERN.fullmatch(requested_slug):
+            raise ControllerError("invalid requested catalog slug")
+        return {"steam_app_id": steam_app_id, "requested_slug": requested_slug, "created_at": self.now()}
+
     def _registered(self, template_id: Any, instance_id: Any) -> dict[str, Any]:
         if not isinstance(template_id, str) or not isinstance(instance_id, str):
             raise ControllerError("template_id and instance_id are required")
@@ -219,13 +294,14 @@ class Controller:
         return subprocess.run(["/usr/bin/systemctl", *arguments], capture_output=True, text=True, timeout=30, check=False)
 
     def service_status(self, instance: dict[str, Any]) -> dict[str, Any]:
-        result = self._systemctl("show", instance["unit"], "--no-page", "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus,ActiveEnterTimestamp,MemoryCurrent,CPUUsageNSec")
+        result = self._systemctl("show", instance["unit"], "--no-page", "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus,ActiveEnterTimestamp,MemoryCurrent,CPUUsageNSec,NRestarts")
         details = {"load_state": "unknown", "active_state": "unknown", "sub_state": "unknown", "result": "unknown"}
         if result.returncode == 0:
             keys = {
                 "LoadState": "load_state", "ActiveState": "active_state", "SubState": "sub_state",
                 "Result": "result", "ExecMainStatus": "exit_status", "ActiveEnterTimestamp": "active_since",
                 "MemoryCurrent": "memory_current_bytes", "CPUUsageNSec": "cpu_usage_nsec",
+                "NRestarts": "restart_count_recent",
             }
             for line in result.stdout.splitlines():
                 name, separator, value = line.partition("=")
@@ -234,9 +310,39 @@ class Controller:
             memory_current = details.get("memory_current_bytes")
             if isinstance(memory_current, str) and memory_current.isdigit():
                 details["memory_current_mib"] = round(int(memory_current) / 1024 / 1024, 1)
+            restart_count = details.get("restart_count_recent", "0")
+            if not isinstance(restart_count, str) or not restart_count.isdigit():
+                restart_count = "0"
+            details["restart_count_recent"] = int(restart_count)
+            details["crash_loop"] = details.get("active_state") == "failed" and (
+                details.get("result") == "start-limit-hit"
+                or int(restart_count) >= CRASH_LOOP_AUTO_RESTART_THRESHOLD
+            )
+            if details["crash_loop"]:
+                details["last_failure_reason"] = "systemd restart limit reached; manual retry required"
         else:
             details["message"] = "service unit is not installed or unavailable"
-        return {"template_id": instance["template_id"], "instance_id": instance["instance_id"], "unit": instance["unit"], "registration_state": instance["registration_state"], **details}
+        return {"template_id": instance["template_id"], "instance_id": instance["instance_id"], "unit": instance["unit"], "registration_state": instance["registration_state"], "backup": self.backup_status_for(instance), **details}
+
+    def backup_status_for(self, instance: dict[str, Any]) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.backup_status_path.read_text(encoding="utf-8"))
+            entries = payload.get("instances", {})
+            status = entries.get(instance["key"], {}) if isinstance(entries, dict) else {}
+            return status if isinstance(status, dict) else {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+
+    def backup_status(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.backup_status_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"schema_version": 1, "instances": {}, "message": "no automated backup has run yet"}
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise ControllerError("backup status is unavailable") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("instances", {}), dict):
+            raise ControllerError("backup status is invalid")
+        return payload
 
     @staticmethod
     def memory_info() -> dict[str, int]:
@@ -349,6 +455,7 @@ class Controller:
         }
         with self.lock:
             self.operations[operation_id] = operation
+            self._save_operations()
         thread = threading.Thread(target=self._run_lifecycle, args=(operation_id, instance, actor), daemon=True)
         thread.start()
         return operation
@@ -359,10 +466,19 @@ class Controller:
             operation = self.operations[operation_id]
             operation["state"] = "starting" if operation["action"] == "start" else "restarting"
             operation["started_at"] = self.now()
+            self._save_operations()
         command = operation["action"]
+        result: subprocess.CompletedProcess[str] | None = None
+        state = "failed"
+        message = "systemd rejected the request"
+        crash_loop = self.service_status(instance).get("crash_loop") is True
+        reset_failed = False
+        if crash_loop:
+            reset_failed = self._systemctl("reset-failed", instance["unit"]).returncode != 0
         admission = self.admission(instance)
-        if not admission["allowed"]:
-            result = None
+        if reset_failed:
+            message = "could not reset systemd crash-loop protection"
+        elif not admission["allowed"]:
             state, message = "failed", "start rejected after queue: " + "; ".join(admission["reasons"])
         else:
             result = self._systemctl(command, instance["unit"], "--no-block")
@@ -388,6 +504,7 @@ class Controller:
             operation["completed_at"] = self.now()
             operation["duration_ms"] = round((time.monotonic() - started) * 1000)
             operation["message"] = message
+            self._save_operations()
         self.audit({
             "action": command, "template_id": instance["template_id"], "instance_id": instance["instance_id"],
             "actor": actor, "result": state, "message": message, "duration_ms": operation["duration_ms"],
@@ -406,7 +523,7 @@ class Controller:
 
     def dispatch(self, request: dict[str, Any], peer_uid: int) -> dict[str, Any]:
         action = request.get("action")
-        if action not in WRITE_ACTIONS | READ_ACTIONS:
+        if action not in WRITE_ACTIONS | READ_ACTIONS | {"create_game_request"}:
             raise ControllerError("unsupported action")
         actor = request.get("actor", "api-unattributed")
         if not isinstance(actor, str) or len(actor) > 256:
@@ -419,6 +536,8 @@ class Controller:
                 payload = list(self.instances.values())
             elif action == "register_instance":
                 payload = self.register_instance(template_id, instance_id)
+            elif action == "create_game_request":
+                payload = self.create_game_request(request.get("steam_app_id"), request.get("requested_slug"))
             elif action in {"start", "restart"}:
                 payload = self.submit_lifecycle(action, template_id, instance_id, actor)
             elif action == "status":
@@ -427,6 +546,8 @@ class Controller:
                 payload = [self.service_status(instance) for instance in self.instances.values()]
             elif action == "capacity":
                 payload = self.capacity_summary()
+            elif action == "backup_status":
+                payload = self.backup_status()
             elif action == "logs":
                 payload = self.read_logs(self._registered(template_id, instance_id), request.get("tail", 50))
             else:

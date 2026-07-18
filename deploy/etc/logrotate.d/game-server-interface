@@ -1,0 +1,16 @@
+/var/log/game-server-interface/audit.jsonl {
+    weekly
+    rotate 12
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0600 root root
+    sharedscripts
+    prerotate
+        /usr/bin/chattr -a /var/log/game-server-interface/audit.jsonl 2>/dev/null || true
+    endscript
+    postrotate
+        /usr/bin/chattr +a /var/log/game-server-interface/audit.jsonl 2>/dev/null || true
+    endscript
+}

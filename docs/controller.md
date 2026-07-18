@@ -24,11 +24,13 @@ The socket protocol is one JSON object per line, with a maximum request size of 
 | `status` | `template_id`, `instance_id` | Returns `systemd` lifecycle status for a registered instance. |
 | `start` | `template_id`, `instance_id` | Queues a non-blocking `systemctl start` operation. |
 | `restart` | `template_id`, `instance_id` | Queues a non-blocking `systemctl restart` operation. |
-| `operation_status` | `operation_id` | Returns the in-memory operation state. |
+| `operation_status` | `operation_id` | Returns persisted operation state retained for 24 hours. |
 | `health` | none | Returns status summaries for all registered instances. |
+| `capacity` | none | Returns capacity reservations, limits, and admission reasons. |
+| `backup_status` | none | Returns latest backup timestamps and verification results. |
 | `logs` | `template_id`, `instance_id`, optional `tail` | Returns at most 100 recent journal lines with common secret assignments redacted. |
 
-The optional `actor` field is limited to 256 characters and is recorded as supplied by the future authenticated API. It is not a browser identity mechanism; Phase 3 must set it only from Tailscale's trusted proxy boundary.
+The optional `actor` field is limited to 256 characters and is supplied by the deployed interface. It is not a browser identity mechanism; the interface sets it only from Tailscale's trusted proxy boundary.
 
 ## Instance lifecycle boundary
 
@@ -38,7 +40,7 @@ Consequently, `start` and `restart` can only request the unit derived from the c
 
 ## Operations and audit records
 
-Start and restart return an operation ID immediately with `queued`, then transition through `starting` or `restarting` to `healthy` or `failed`. The controller records completion duration and outcome. Operation state is intentionally in-memory in this phase; callers must treat it as unavailable after a controller restart and query `status` instead.
+Start and restart return an operation ID immediately with `queued`, then transition through `starting` or `restarting` to `healthy` or `failed`. The controller records completion duration and outcome. Operations are persisted atomically at `/var/lib/game-server-interface/operations.json`; completed operations remain queryable for 24 hours after a controller restart. An operation interrupted by controller restart is marked failed rather than silently disappearing.
 
 Audit records are JSON lines in `/var/log/game-server-interface/audit.jsonl`, mode `0600`, owned by root. The installer applies the filesystem append-only flag when supported. Every accepted request and lifecycle completion includes a timestamp, template and instance ID, requested action, API-provided actor, peer UID, result, and applicable duration. Audit failure causes the request to fail rather than silently continuing.
 

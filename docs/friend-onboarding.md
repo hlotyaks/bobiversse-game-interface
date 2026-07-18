@@ -15,8 +15,9 @@ access to the host's desktop, SSH, or home network — only the game.
 3. **Send your device name for approval.** In the Tailscale app, copy the device name it
    shows and send it to the admin. Confirm the app shows the network name and says
    **Connected**. Wait for the admin to say your device is approved.
-4. **Connect in Enshrouded.** Launch the game → **Play** → **Add Server** (server list), then:
-   - Address: `100.84.161.38:15636`  (or `bobiverse.tail40344b.ts.net:15636` if names work for you)
+4. **Connect in Enshrouded.** Open the private dashboard at `https://bobiverse.tail40344b.ts.net/` and copy the address shown beside the chosen active instance. Then launch the game → **Play** → **Add Server** (server list), then:
+      - Primary address: `100.84.161.38:15636`
+      - Secondary test address: `100.84.161.38:15640` (only when the admin explicitly invites you to the test world)
    - Password: `<server password — the admin shares this privately>`
    Leave Tailscale running in the background while you play.
 
@@ -32,7 +33,7 @@ codes, or keys.
 > 2. Install Tailscale from https://tailscale.com/download, then open it and log in with that
 >    same account. (Windows: restart if the first login hangs.)
 > 3. Send me the device name the Tailscale app shows, and wait for me to approve it.
-> 4. In Enshrouded: Play → Add Server → address `100.84.161.38:15636`, password `<server password — the admin shares this privately>`.
+> 4. Open `https://bobiverse.tail40344b.ts.net/`, copy the address shown for the active world, then in Enshrouded choose Play → Add Server and enter it. Use password `<server password — the admin shares this privately>`.
 >    Keep Tailscale connected while you play.
 
 ## Admin checklist (server owner)
@@ -49,7 +50,7 @@ Do these before telling a new player they're ready:
       only UDP `15636` on `bobiverse` — not SSH (TCP 22) or any other host/port. See
       [tailscale-policy.example.hujson](tailscale-policy.example.hujson) and
       [tailscale-publishing.md](tailscale-publishing.md).
-- [ ] **Share the connect details** (`100.84.161.38:15636`, password `<server password — the admin shares this privately>`) privately —
+- [ ] **Share the connect details** from the private dashboard (primary currently `100.84.161.38:15636`; secondary test world `100.84.161.38:15640`) and password `<server password — the admin shares this privately>` privately —
       only with invited players. The password is the same for everyone; the tailnet membership
       is the real gate, and anyone who joins with it has in-game Admin rights.
 - [ ] **Removing a player:** revoke their device/account in the Tailscale admin console; access
