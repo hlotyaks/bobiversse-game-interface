@@ -1,0 +1,28 @@
+[Unit]
+Description=Game Server Interface player-presence meter (usage metering, Stage 1)
+Documentation=file:///etc/game-server-interface/billing.yaml
+After=game-server-interface-controller.service tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Samples active tailnet UDP flows to each game port and resolves them to Tailscale logins,
+# appending one occupancy record per instance per cycle to the presence ledger. conntrack needs
+# network-admin capability; tailscale reads the tailnet identity map. No game data or secrets.
+ExecStart=/usr/local/libexec/game-server-interface/presence_meter.py --interval 60
+Restart=on-failure
+RestartSec=15s
+Nice=10
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/game-server-interface
+# conntrack enumeration requires CAP_NET_ADMIN; everything else is dropped.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
