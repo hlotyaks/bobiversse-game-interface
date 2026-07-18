@@ -106,7 +106,9 @@ templates:
       health_check: UDP gameplay/query-port probe plus a successful server-start log event
       timeout_seconds: 1200
     resources:
-      cpu_cores: 2
+      # Enshrouded is CPU-bound during group combat; 2 cores throttled hard (see 2026-07-18
+      # diagnosis). Raised to 4 (still <= the 6-core admission limit).
+      cpu_cores: 4
       memory_mib: 6144
       disk_gib: 30
       player_capacity: 16

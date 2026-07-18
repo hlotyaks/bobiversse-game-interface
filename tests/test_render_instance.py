@@ -51,7 +51,7 @@ class RenderEnshroudedTests(unittest.TestCase):
 
     def test_resource_limits_come_from_the_catalog(self) -> None:
         self.assertEqual(self.service["mem_limit"], "6144m")
-        self.assertEqual(self.service["cpus"], 2.0)
+        self.assertEqual(self.service["cpus"], 4.0)
         self.assertEqual(self.service["cap_drop"], ["ALL"])
         self.assertIn("no-new-privileges:true", self.service["security_opt"])
 
@@ -64,7 +64,7 @@ class RenderEnshroudedTests(unittest.TestCase):
 
     def test_unit_carries_catalog_systemd_limits_and_paths(self) -> None:
         unit = self.files["game-enshrouded-primary.service"]
-        self.assertIn("CPUQuota=200%", unit)
+        self.assertIn("CPUQuota=400%", unit)
         self.assertIn("MemoryMax=6144M", unit)
         self.assertIn("TimeoutStartSec=1200s", unit)
         self.assertIn(
