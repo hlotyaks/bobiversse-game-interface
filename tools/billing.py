@@ -49,10 +49,36 @@ def multiplier(n: int, schedule: dict[int, float], default: float) -> float:
     return float(schedule.get(n, default))
 
 
+def current_month() -> str:
+    return datetime.now(UTC).strftime("%Y-%m")
+
+
+def month_bounds(month: str) -> tuple[datetime, datetime]:
+    """Return the [start, end) UTC datetimes for a ``YYYY-MM`` calendar month."""
+    year, mon = (int(part) for part in month.split("-", 1))
+    start = datetime(year, mon, 1, tzinfo=UTC)
+    end = datetime(year + 1, 1, 1, tzinfo=UTC) if mon == 12 else datetime(year, mon + 1, 1, tzinfo=UTC)
+    return start, end
+
+
+def available_months(samples: list[dict[str, Any]]) -> list[str]:
+    """Sorted (ascending) list of ``YYYY-MM`` months that have at least one sample."""
+    return sorted({sample["ts_dt"].astimezone(UTC).strftime("%Y-%m") for sample in samples})
+
+
+def filter_by_month(samples: list[dict[str, Any]], month: str) -> list[dict[str, Any]]:
+    start, end = month_bounds(month)
+    return [sample for sample in samples if start <= sample["ts_dt"] < end]
+
+
 def load_ledger(path: Path, instance: str | None = None) -> list[dict[str, Any]]:
     """Read a presence-ledger JSONL file into validated, time-parsed sample records."""
     samples: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return samples
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -195,7 +221,7 @@ def _hours(value: float) -> str:
 def render_text(report: dict[str, Any], instance: str) -> str:
     currency = report.get("currency") or ""
     lines = [
-        f"Usage report for {instance}",
+        f"Usage report for {instance}  ({report.get('month', '')})",
         f"  period: {report['period']['start']} -> {report['period']['end']}",
         f"  server up: {_hours(report['totals']['server_up_hours'])}   "
         f"players: {report['totals']['player_count']}   "
@@ -222,8 +248,17 @@ def render_text(report: dict[str, Any], instance: str) -> str:
     return "\n".join(lines)
 
 
-def build_report(ledger_path: Path, config: dict[str, Any], instance: str) -> dict[str, Any]:
-    samples = load_ledger(ledger_path, instance=instance)
+def build_report(ledger_path: Path, config: dict[str, Any], instance: str, month: str | None = None) -> dict[str, Any]:
+    """Build the report for one instance, scoped to a ``YYYY-MM`` month (default: current).
+
+    ``available_months`` is computed from the whole ledger (before month filtering) so a caller
+    can offer a month selector; the current month is always included so "this month to date" is
+    selectable even before any play has happened.
+    """
+    all_samples = load_ledger(ledger_path, instance=instance)
+    months = sorted(set(available_months(all_samples)) | {current_month()})
+    selected = month if month else current_month()
+    samples = filter_by_month(all_samples, selected)
     instances = config.get("instances", {})
     instance_cfg = instances.get(instance, {}) if isinstance(instances, dict) else {}
     rate = float(instance_cfg.get("run_cost_per_hour", 0.0))
@@ -237,6 +272,8 @@ def build_report(ledger_path: Path, config: dict[str, Any], instance: str) -> di
     )
     report["currency"] = config.get("currency", "USD")
     report["instance"] = instance
+    report["month"] = selected
+    report["available_months"] = months
     return report
 
 
@@ -245,6 +282,7 @@ def main() -> int:
     parser.add_argument("--ledger", type=Path, default=Path("/var/lib/game-server-interface/presence.jsonl"))
     parser.add_argument("--config", type=Path, default=Path("/etc/game-server-interface/billing.yaml"))
     parser.add_argument("--instance", required=True, help="instance id, e.g. enshrouded-primary")
+    parser.add_argument("--month", help="YYYY-MM to report (default: current month to date)")
     parser.add_argument("--json", action="store_true", help="emit the report as JSON instead of text")
     args = parser.parse_args()
 
@@ -252,7 +290,7 @@ def main() -> int:
         config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
         if not isinstance(config, dict):
             raise ValueError("billing config must be a mapping")
-        report = build_report(args.ledger, config, args.instance)
+        report = build_report(args.ledger, config, args.instance, args.month)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"billing report failed: {exc}", file=sys.stderr)
         return 1

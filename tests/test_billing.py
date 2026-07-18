@@ -128,5 +128,43 @@ class LedgerParsingTests(unittest.TestCase):
         self.assertEqual(rows[1]["present"], ["a", "b"])  # deduped + sorted
 
 
+class MonthTests(unittest.TestCase):
+    def test_month_bounds_including_december_rollover(self) -> None:
+        start, end = BILLING.month_bounds("2026-07")
+        self.assertEqual((start.year, start.month, start.day), (2026, 7, 1))
+        self.assertEqual((end.year, end.month), (2026, 8))
+        _, dec_end = BILLING.month_bounds("2026-12")
+        self.assertEqual((dec_end.year, dec_end.month), (2027, 1))
+
+    def test_available_months_and_filter(self) -> None:
+        rows = samples([(0, ["alice"])])
+        rows[0]["ts_dt"] = datetime(2026, 6, 30, 23, 59, tzinfo=UTC)
+        rows.append({"ts_dt": datetime(2026, 7, 1, 0, 1, tzinfo=UTC), "instance": "enshrouded-primary", "present": ["bob"]})
+        self.assertEqual(BILLING.available_months(rows), ["2026-06", "2026-07"])
+        july = BILLING.filter_by_month(rows, "2026-07")
+        self.assertEqual([s["present"] for s in july], [["bob"]])
+
+    def test_build_report_scopes_to_month_and_lists_months(self) -> None:
+        import json
+        import tempfile
+        lines = [
+            {"ts": "2026-06-15T20:00:00Z", "instance": "enshrouded-primary", "present": ["alice"]},
+            {"ts": "2026-07-10T20:00:00Z", "instance": "enshrouded-primary", "present": ["alice", "bob"]},
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as handle:
+            handle.write("\n".join(json.dumps(row) for row in lines))
+            ledger = Path(handle.name)
+        config = {"currency": "USD", "instances": {"enshrouded-primary": {"run_cost_per_hour": 0.18}}, "multiplier_schedule": {1: 1.5, 2: 1.2}, "default_multiplier": 0.75}
+        report = BILLING.build_report(ledger, config, "enshrouded-primary", month="2026-06")
+        self.assertEqual(report["month"], "2026-06")
+        self.assertIn("2026-06", report["available_months"])
+        self.assertIn("2026-07", report["available_months"])
+        self.assertIn("alice", report["users"])
+        self.assertNotIn("bob", report["users"])  # bob only played in July
+
+    def test_missing_ledger_is_empty_not_an_error(self) -> None:
+        self.assertEqual(BILLING.load_ledger(Path("/nonexistent/presence.jsonl")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

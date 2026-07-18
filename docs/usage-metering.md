@@ -82,8 +82,26 @@ If Docker's userland proxy is masking the real client source in conntrack (see t
 note in the provisioning docs), the fallback is to sample on the `tailscale0` ingress instead;
 capture a real session's `conntrack -L` output and adjust `parse_conntrack_peers` accordingly.
 
+## Web dashboard
+
+The dashboard shows a **Your bill** panel with a world selector and a **month selector** (the
+current month "to date" plus any past months present in the ledger). Data flows
+`presence ledger -> billing.py -> controller "billing" read action -> interface /api/billing ->
+UI`, keyed to the viewer's Tailscale login:
+
+- **Every player** sees only their own line — hours, solo/group split, and their dry-run share.
+- **Administrators** (the `is_game_administrator` gate: `TRUSTED_ACTOR_HEADER=1` and the login in
+  `GAME_INTERFACE_ADMIN_LOGINS`) additionally see the full per-user table and the aggregate
+  totals (server-up hours, actual cost, charged, kitty). Non-admins never receive other players'
+  data — the interface filters the controller's full report down to the caller's own line before
+  it reaches the browser.
+
+The controller reads the ledger and `billing.yaml` (both root-owned) and calls the sibling
+`billing.py`; the read is audited by actor like every other controller action. No new install
+step beyond `install-usage-metering.sh` (which places `billing.py` next to the controller); the
+admin view requires the interface's admin env, same as the other admin features.
+
 ## Not in this stage
 
-No web-UI display yet, and no payments. The **per-user bill in the dashboard** (each user sees
-their own; admins see everyone's, via the existing admin gate) is the next increment and reads
-this same calculator output. Stripe money-handling is Stage 2.
+No payments. Stripe money-handling (enrollment, monthly invoicing, reconciliation) is Stage 2 and
+builds on this same ledger and calculator.

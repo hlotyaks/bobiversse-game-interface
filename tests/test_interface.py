@@ -73,5 +73,47 @@ class InterfaceInputTests(unittest.TestCase):
             MODULE.GAME_INTERFACE_ADMIN_LOGINS = previous_logins
 
 
+class BillingRouteTests(unittest.TestCase):
+    def test_billing_params_require_valid_ids_and_optional_month(self) -> None:
+        self.assertEqual(
+            MODULE.billing_request_params("/api/billing?template_id=enshrouded&instance_id=primary"),
+            {"template_id": "enshrouded", "instance_id": "primary"},
+        )
+        self.assertEqual(
+            MODULE.billing_request_params("/api/billing?template_id=enshrouded&instance_id=primary&month=2026-07"),
+            {"template_id": "enshrouded", "instance_id": "primary", "month": "2026-07"},
+        )
+        self.assertIsNone(MODULE.billing_request_params("/api/billing?template_id=../x&instance_id=primary"))
+        self.assertIsNone(MODULE.billing_request_params("/api/billing?template_id=enshrouded&instance_id=primary&month=2026-13"))
+        self.assertIsNone(MODULE.billing_request_params("/api/billing?instance_id=primary"))
+
+    def test_non_admin_sees_only_their_own_line(self) -> None:
+        report = {
+            "instance": "enshrouded-primary", "month": "2026-07", "available_months": ["2026-07"],
+            "currency": "USD", "run_cost_per_hour": 0.18,
+            "users": {"alice@ex": {"hours": 2.0, "charge": 0.2}, "bob@ex": {"hours": 1.0, "charge": 0.1}},
+            "totals": {"kitty": 0.05, "actual_cost": 0.25},
+        }
+        view = MODULE.filter_billing_for_actor(report, "alice@ex", is_admin=False)
+        self.assertEqual(view["you"], {"hours": 2.0, "charge": 0.2})
+        self.assertFalse(view["is_admin"])
+        self.assertNotIn("users", view)   # cannot see bob
+        self.assertNotIn("totals", view)  # cannot see the aggregate kitty
+        self.assertEqual(view["available_months"], ["2026-07"])
+
+    def test_admin_sees_everyone_and_totals(self) -> None:
+        report = {
+            "instance": "enshrouded-primary", "month": "2026-07", "available_months": ["2026-07"],
+            "currency": "USD", "run_cost_per_hour": 0.18,
+            "users": {"alice@ex": {"charge": 0.2}, "bob@ex": {"charge": 0.1}},
+            "totals": {"kitty": 0.05},
+        }
+        view = MODULE.filter_billing_for_actor(report, "admin@ex", is_admin=True)
+        self.assertTrue(view["is_admin"])
+        self.assertEqual(set(view["users"]), {"alice@ex", "bob@ex"})
+        self.assertEqual(view["totals"]["kitty"], 0.05)
+        self.assertIsNone(view["you"])  # admin themselves did not play
+
+
 if __name__ == "__main__":
     unittest.main()

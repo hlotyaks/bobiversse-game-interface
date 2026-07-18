@@ -36,6 +36,25 @@
     <section class="capacity" id="capacity" aria-live="polite"></section>
     <section class="grid" id="catalog" aria-live="polite"></section>
 
+    <section class="billing" id="billing" aria-live="polite" hidden>
+      <div class="billing-head">
+        <div>
+          <p class="eyebrow">USAGE &amp; COST SHARING</p>
+          <h2>Your bill</h2>
+          <p class="billing-sub">Dry run — no money is charged. Solo play carries a premium; grouping up is cheaper.</p>
+        </div>
+        <div class="billing-controls">
+          <label>World
+            <select id="billing-instance"></select>
+          </label>
+          <label>Month
+            <select id="billing-month"></select>
+          </label>
+        </div>
+      </div>
+      <div class="billing-body" id="billing-body"></div>
+    </section>
+
     <template id="game-template">
       <article class="game-card">
         <div class="game-head">
