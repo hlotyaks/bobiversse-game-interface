@@ -14,17 +14,30 @@ This is the first of two stages toward the cost-sharing feature described in
 ## How players are identified
 
 Enshrouded does not log player identity — its stdout only reports an anonymous connected-machine
-count. So identity comes from the tailnet instead: every player reaches the tailnet-bound game
-port from their own Tailscale node, so the meter reads the live UDP flows to the game port and
-resolves each peer's tailnet IP to its Tailscale login. This reuses the same identity the
-dashboard already attributes actions by (`Tailscale-User-Login`), needs **no separate login
-system**, and is game-agnostic (it will work for Valheim or any future UDP game unchanged).
+count — so identity comes from the network layer. The meter has two interchangeable sources:
+
+- **`tailscale` (default).** Players reach the game over the tailnet, so their packets travel
+  inside the WireGuard tunnel and the kernel's conntrack never sees a `client → game-port` flow
+  (this was verified on bobiverse; full evidence in
+  [presence-source-conntrack-findings.md](presence-source-conntrack-findings.md)). Instead the
+  meter reads `tailscale status --json` and counts a peer as **playing** when it is `Active` **and**
+  its traffic rate since the last sample exceeds `--min-kbps` (default 25) — the rate is what
+  separates a player from someone merely viewing the dashboard. Presence is attributed to instances
+  whose systemd unit is active. Identity is the Tailscale login, the same one the dashboard uses, so
+  there is **no separate login system**.
+- **`conntrack`.** Watches `conntrack -L` for direct `client → game-port` flows. This is blind under
+  Tailscale (above) but is the right source for a future cloud/public-IP deployment without the
+  WireGuard tunnel. Preserved and tested; switch with `--source conntrack`.
+
+Known limits of the default source (fine for a dry-run Stage 1): a one-cycle startup lag (a rate
+needs two samples), the `--min-kbps` threshold may need tuning per game, and if two games run at
+once a player's traffic counts toward each running instance (it can't be split between them).
 
 ## Components
 
 | Piece | File | Role |
 | --- | --- | --- |
-| Presence meter | [tools/presence_meter.py](../tools/presence_meter.py) | Root systemd service. Each cycle lists tailnet UDP flows per game port (`conntrack`), maps IPs to logins (`tailscale status --json`), and appends an occupancy sample to the ledger. |
+| Presence meter | [tools/presence_meter.py](../tools/presence_meter.py) | Root systemd service. Each cycle reads `tailscale status --json`, marks Active peers over the traffic-rate threshold as playing, attributes them to active game units, and appends an occupancy sample to the ledger. (`--source conntrack` swaps in the direct-flow source for non-Tailscale deployments.) |
 | Presence ledger | `/var/lib/game-server-interface/presence.jsonl` | Append-only JSONL, one line per instance per cycle: `{"ts","instance","present":[logins]}`. Root-owned, `0600` — it is playtime metadata (who played when); treat it as private, like the audit log. |
 | Billing config | [deploy/etc/game-server-interface/billing.yaml](../deploy/etc/game-server-interface/billing.yaml) | Nominal per-instance run-cost and the group-size multiplier schedule `m(n)`. No secrets. |
 | Billing calculator | [tools/billing.py](../tools/billing.py) | Pure calculator over the ledger. Produces per-user hours, solo/group split, sessions, and the dry-run bill (text or `--json`). |
@@ -46,7 +59,8 @@ capped at `max_gap_seconds` so meter downtime is never billed as continuous play
 
 This installs the meter and calculator to `/usr/local/libexec/game-server-interface/`, installs
 the billing config (without overwriting an edited copy) and the systemd unit, and starts
-`game-presence-meter.service`. Runtime prerequisites: `conntrack` and the `tailscale` CLI.
+`game-presence-meter.service`. Runtime prerequisite: the `tailscale` CLI (the default source);
+`conntrack` is only needed if you switch to `--source conntrack`.
 
 ## Read a report
 
@@ -71,16 +85,20 @@ carries the premium — the incentive is legible directly on the bill.
 
 ## Validating the presence meter live
 
-The parsing and billing logic are covered by unit tests, but the conntrack-based presence capture
-can only be confirmed with a real session (an idle server shows no flows). On first use, with at
-least one player connected, check that the meter sees them:
+The parsing and billing logic are covered by unit tests, but the live capture can only be confirmed
+with a real session. With at least one player connected (and after ~2 sample intervals, since a
+traffic rate needs two samples), check that the meter sees them:
 
-    sudo conntrack -L -p udp --dport 15636 | grep -c 'src=100\.'   # nonzero while someone plays
-    tail -f /var/lib/game-server-interface/presence.jsonl          # samples should list logins
+    sudo tail -f /var/lib/game-server-interface/presence.jsonl     # your instance line should list logins
 
-If Docker's userland proxy is masking the real client source in conntrack (see the networking
-note in the provisioning docs), the fallback is to sample on the `tailscale0` ingress instead;
-capture a real session's `conntrack -L` output and adjust `parse_conntrack_peers` accordingly.
+Cross-check identity and rate against the source the meter reads:
+
+    tailscale status                                               # the player shows as active with traffic
+
+If a real player is `Active` but never appears in the ledger, the `--min-kbps` threshold is likely
+too high for that game — lower it in the unit's `ExecStart`. If a non-player (dashboard viewer) is
+wrongly counted, raise it. Background on why this replaced the conntrack source is in
+[presence-source-conntrack-findings.md](presence-source-conntrack-findings.md).
 
 ## Web dashboard
 

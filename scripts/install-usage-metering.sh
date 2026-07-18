@@ -12,9 +12,10 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# conntrack and tailscale are required by the meter at runtime.
-command -v conntrack >/dev/null 2>&1 || echo "WARN: conntrack not found (apt install conntrack) -- the meter needs it" >&2
-command -v tailscale >/dev/null 2>&1 || echo "WARN: tailscale CLI not found -- the meter needs it for identity" >&2
+# The default 'tailscale' source needs the tailscale CLI. conntrack is only needed if the meter
+# is switched to '--source conntrack' (a future non-Tailscale deployment).
+command -v tailscale >/dev/null 2>&1 || echo "WARN: tailscale CLI not found -- the default presence source needs it" >&2
+command -v conntrack >/dev/null 2>&1 || echo "note: conntrack not installed (only needed for --source conntrack)" >&2
 
 install -d -o root -g root -m 0700 /var/lib/game-server-interface
 install -o root -g root -m 0755 "${repo_root}/tools/presence_meter.py" "${install_root}/presence_meter.py"
