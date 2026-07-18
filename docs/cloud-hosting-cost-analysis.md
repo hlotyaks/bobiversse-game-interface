@@ -131,6 +131,121 @@ Suggested path if ratified: start with **one game (Enshrouded) on GCP, elastic, 
 `bobiverse` as the control plane, Terraform + Packer**, validate the wake/sleep UX and a real
 monthly bill, then extend the module to additional games.
 
+## Optional add-on: usage-based cost sharing (Stripe)
+
+A proposed billing layer that attributes the real hosting cost across the friend group by
+**who is actually present**, so that solo play carries the full fare and group play splits it.
+The explicit goal is **not to make money** (it recovers cost, no more) but to **price in the
+incentive to play together**.
+
+### The attribution model
+
+Charge the server's run-cost at each moment split evenly among the players present at that
+moment, integrated over the session:
+
+```
+player_i_charge = ∫ ( C(t) / n(t) ) · present_i(t) dt
+```
+
+where `C(t)` is the instance's run-cost rate ($/hr) while it is up, `n(t)` is the number of
+players connected at time `t`, and `present_i(t)` is 1 while player *i* is connected. In
+practice we sample occupancy per minute and divide.
+
+Properties that make it fair and cost-exact:
+
+- **Sums to the real bill.** As long as at least one player is present, the players' charges
+  for that interval add up to exactly `C(t)` — full cost recovery, zero profit or loss.
+- **Solo pays full, groups split.** Illustrative at a headline `$1/hr` run-cost:
+
+  | Players present | Each pays | 
+  | --- | --- |
+  | 1 | $1.00/hr |
+  | 2 | $0.50/hr |
+  | 3 | $0.33/hr |
+  | 4 | $0.25/hr |
+
+- **Reflects who showed up when.** If Alice plays 8–10 pm and Bob joins only 9–10, Alice pays
+  the full rate 8–9 and they split 9–10 — Bob's arrival lowers Alice's second hour.
+- **No perverse incentive.** Every additional body only lowers everyone's share, so there is
+  nothing to game; even an AFK player helps the others.
+
+**Reality check on the numbers.** With the recommended GCP-elastic design the run-cost is not
+$1/hr — `e2-standard-4` is ~$0.134/hr compute plus a small egress allowance, so the real fare
+is roughly **$0.15–0.20/hr solo, ~$0.05/hr each in a group of four.** A month of moderate solo
+play is ~$15–20; the same play in a group is ~$5. The dollars are small, which is central to
+the design decisions below.
+
+### The three things that do not map cleanly to "active play"
+
+1. **Cold start and idle grace.** The ~1–2 min wake and the ~15 min idle-shutdown tail burn
+   compute with zero or few players. Proposed rule: **the player who wakes the server pays the
+   cold-start**, and the idle-grace tail is charged to whoever was last present (or socialized
+   as a tiny fixed per-session fee). Keep this small and explicit on the bill.
+2. **Fixed monthly cost.** The persistent disk (~$3/mo/game) accrues whether or not anyone
+   plays and cannot be usage-attributed. Proposed: a small flat **monthly membership** per
+   enrolled member covers disk + always-on overhead; everything else is usage-based.
+3. **After-the-fact variability.** The true cloud invoice (especially egress) is only known at
+   month end. Charge a **published per-game hourly rate** (compute + egress buffer) during the
+   month, then **reconcile against the actual invoice** and carry the difference forward as a
+   credit/debit. Publish the reconciliation so the group can see it nets to zero.
+
+### Stripe mechanics (the fee problem forces the shape)
+
+Stripe costs ~2.9% + $0.30 **per charge**. Charging a $0.25 session would lose money to fees,
+so the system **must not charge per session**:
+
+- **Meter continuously, charge monthly.** Accumulate each member's per-minute charges into an
+  append-only ledger (same discipline as the existing root-only `audit.jsonl`), then create
+  **one Stripe invoice per member per month** (or when a balance crosses, say, $10). This is
+  Stripe Billing's metered/usage model and keeps fees at ~3%.
+- **Card on file, minimal PCI scope.** Members enroll once via **Stripe Checkout / Elements**
+  (Stripe-hosted), so card data never touches our servers (PCI SAQ A). We store only the Stripe
+  customer/payment-method IDs.
+- **Itemized receipts.** Each monthly bill shows every session: date, duration, who else was
+  present, the rate, and the resulting share — transparency is the anti-dispute mechanism.
+- **Secrets and webhooks.** The Stripe secret key is a root-only secret handled like
+  `SERVER_PASSWORD` (never in the catalog, logs, or the friend-facing interface); webhook events
+  are signature-verified.
+
+### Data backbone and architecture
+
+- **Presence events.** The meter needs reliable per-player join/leave timestamps. Source them
+  from the game server's connect/disconnect log events (Enshrouded/Valheim) or the query/RCON
+  port, keyed to a stable identity — the **Tailscale login** we already attribute actions by,
+  or the Steam ID.
+- **Where it runs.** The metering + monthly billing job live on the `bobiverse` control plane
+  alongside the controller; they read presence events and the instance's run-rate, write the
+  member ledger, and call Stripe. No new always-on cloud cost.
+- **Consent.** Charging real money requires explicit opt-in, saved-payment authorization, and
+  simple written terms (what is charged, how reconciliation works, refunds/disputes).
+
+### Honest tradeoff before building this
+
+At a total infra cost of ~$30–45/mo for two games, the amounts moved per person are small
+(single-digit to low-double-digit dollars). A full Stripe integration adds a **payments + PII +
+secrets + reconciliation surface** whose fees and maintenance may exceed what it recovers for a
+handful of friends. Lighter options that keep most of the incentive:
+
+- **Transparent ledger + manual settle-up.** Do all the metering and itemized monthly
+  statements, but settle via Venmo/PayPal/"just square up" instead of automated card charges.
+  Near-zero fees, no PCI/consent surface, same group-play incentive.
+- **Flat monthly membership.** Everyone enrolled pays an equal share of the total bill.
+  Dead simple, but loses the per-usage incentive that is the whole point here.
+
+**Recommendation:** build the **metering + itemized transparent statements first** (that is
+where the incentive and the fairness live), and treat **automated Stripe charging as a second
+phase** the group opts into only if manual settle-up becomes annoying. This delivers the
+group-play incentive immediately without standing up a payment processor for lunch-money sums.
+
+### Billing open questions
+
+- Automated Stripe charges, or metered statements + manual settle-up to start?
+- Who eats the Stripe fee and any un-recovered rounding — socialize it onto each bill, or does
+  the admin absorb it?
+- Membership fee for fixed costs, or fold fixed cost into a slightly higher hourly rate?
+- Does making solo play cost 4× risk the world simply going unplayed when no group forms — and
+  is that acceptable, or do we want a solo cap?
+
 ## Open questions for review
 
 - Is the ~1–2 min "click to wake" cold start acceptable UX, or do we want a small always-on
