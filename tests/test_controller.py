@@ -96,6 +96,38 @@ class ControllerContractTests(unittest.TestCase):
         self.assertTrue(status["crash_loop"])
         self.assertEqual(status["restart_count_recent"], 3)
 
+    def test_billing_action_returns_per_user_report(self) -> None:
+        root = Path(self.temporary.name)
+        ledger = root / "presence.jsonl"
+        ledger.write_text(
+            '{"ts":"2026-07-10T20:00:00Z","instance":"enshrouded-primary","present":["alice@ex"]}\n'
+            '{"ts":"2026-07-10T20:01:00Z","instance":"enshrouded-primary","present":["alice@ex","bob@ex"]}\n'
+        )
+        billing_config = root / "billing.yaml"
+        billing_config.write_text(MODULE.yaml.safe_dump({
+            "currency": "USD",
+            "instances": {"enshrouded-primary": {"run_cost_per_hour": 0.18}},
+            "multiplier_schedule": {1: 1.5, 2: 1.2},
+            "default_multiplier": 0.75,
+        }))
+        controller = MODULE.Controller(
+            self.catalog, root / "state2/instances.json", root / "log2/audit.jsonl",
+            presence_ledger=ledger, billing_config=billing_config,
+            billing_module=Path(__file__).parents[1] / "tools" / "billing.py",
+        )
+        response = controller.dispatch(
+            {"action": "billing", "actor": "alice@ex", "template_id": "enshrouded", "instance_id": "primary", "month": "2026-07"},
+            peer_uid=995,
+        )
+        report = response["result"]
+        self.assertEqual(report["instance"], "enshrouded-primary")
+        self.assertEqual(report["month"], "2026-07")
+        self.assertEqual(set(report["users"]), {"alice@ex", "bob@ex"})
+
+    def test_billing_rejects_a_malformed_month(self) -> None:
+        with self.assertRaises(MODULE.ControllerError):
+            self.controller.billing_report("enshrouded", "primary", "2026-99")
+
     def test_game_request_is_audited_without_creating_instance_state(self) -> None:
         response = self.controller.dispatch(
             {"action": "create_game_request", "actor": "admin@example.test", "steam_app_id": 1203620, "requested_slug": "enshrouded"},

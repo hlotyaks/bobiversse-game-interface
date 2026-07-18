@@ -8,6 +8,10 @@ const gameRequestError = document.querySelector('#game-request-error');
 const addGameButton = document.querySelector('#add-game');
 const template = document.querySelector('#game-template');
 const refreshStatusElement = document.querySelector('#refresh-status');
+const billingSection = document.querySelector('#billing');
+const billingBody = document.querySelector('#billing-body');
+const billingInstanceSelect = document.querySelector('#billing-instance');
+const billingMonthSelect = document.querySelector('#billing-month');
 const IDLE_REFRESH_INTERVAL_MS = 10000;
 const OPERATION_REFRESH_INTERVAL_MS = 2000;
 const OPERATION_MAX_ATTEMPTS = 60;
@@ -17,6 +21,8 @@ let capacity = null;
 let gameRequestPolicy = { allowed: false };
 let refreshTimer = null;
 let refreshInFlight = false;
+let billing = null;
+const billingSelection = { key: null, month: null };
 const trackedOperations = new Map();
 const consoleEntries = new Map();
 
@@ -176,6 +182,90 @@ function renderCapacity() {
     card.innerHTML = `<span>${label}</span><strong>${value}</strong><small>${detail}</small>`;
     capacityElement.append(card);
   });
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
+}
+
+function money(currency, amount) {
+  return `${currency} ${Number(amount || 0).toFixed(2)}`;
+}
+
+function monthLabel(month) {
+  const currentUtc = new Date().toISOString().slice(0, 7);
+  if (month === currentUtc) return 'This month (to date)';
+  const [year, mon] = month.split('-').map(Number);
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${names[mon - 1] || month} ${year}`;
+}
+
+function optionElement(value, label, selected) {
+  const option = document.createElement('option');
+  option.value = value;
+  option.textContent = label;
+  option.selected = Boolean(selected);
+  return option;
+}
+
+function registeredBillingInstances() {
+  return instances
+    .filter((record) => record?.instance?.template_id && record?.instance?.instance_id)
+    .map((record) => ({
+      key: `${record.instance.template_id}:${record.instance.instance_id}`,
+      label: `${record.instance.display_name || record.instance.template_id} · ${record.instance.instance_id}`,
+    }));
+}
+
+function setupBilling() {
+  const options = registeredBillingInstances();
+  billingSection.hidden = options.length === 0;
+  if (!options.length) { billing = null; return; }
+  const keys = options.map((option) => option.key);
+  if (!billingSelection.key || !keys.includes(billingSelection.key)) {
+    billingSelection.key = options[0].key;
+    billingSelection.month = null;
+    billing = null;
+  }
+  billingInstanceSelect.replaceChildren(...options.map((option) => optionElement(option.key, option.label, option.key === billingSelection.key)));
+  if (billing === null) loadBilling();
+  else renderBilling();
+}
+
+async function loadBilling() {
+  if (!billingSelection.key) return;
+  const [templateId, instanceId] = billingSelection.key.split(':');
+  const params = new URLSearchParams({ template_id: templateId, instance_id: instanceId });
+  if (billingSelection.month) params.set('month', billingSelection.month);
+  try {
+    billing = await request(`/api/billing?${params.toString()}`);
+    billingSelection.month = billing.month;
+  } catch (error) {
+    billing = { error: error.message };
+  }
+  renderBilling();
+}
+
+function renderBilling() {
+  if (!billing) { billingBody.replaceChildren(); return; }
+  if (billing.error) { billingBody.innerHTML = `<p class="empty">${escapeHtml(billing.error)}</p>`; return; }
+  const months = (billing.available_months || []).slice().sort().reverse();
+  billingMonthSelect.replaceChildren(...months.map((month) => optionElement(month, monthLabel(month), month === billing.month)));
+  const currency = billing.currency || '';
+  const you = billing.you;
+  const yourShare = you
+    ? `<div class="bill-card"><span class="eyebrow">YOUR SHARE — ${escapeHtml(billing.viewer)}</span><strong>${money(currency, you.charge)}</strong><small>${Number(you.hours).toFixed(2)}h played · ${Number(you.solo_hours).toFixed(2)}h solo (${you.solo_pct}%) · ${Number(you.group_hours).toFixed(2)}h grouped</small></div>`
+    : `<div class="bill-card"><span class="eyebrow">YOUR SHARE</span><strong>${money(currency, 0)}</strong><small>No usage recorded for you in ${escapeHtml(billing.month)}.</small></div>`;
+  let admin = '';
+  if (billing.is_admin) {
+    const rows = Object.entries(billing.users || {})
+      .sort((left, right) => right[1].hours - left[1].hours)
+      .map(([login, data]) => `<tr><td>${escapeHtml(login)}</td><td>${Number(data.hours).toFixed(2)}</td><td>${data.solo_pct}%</td><td>${money(currency, data.charge)}</td></tr>`)
+      .join('');
+    const totals = billing.totals || {};
+    admin = `<div class="bill-admin"><p class="eyebrow">ALL PLAYERS · ADMIN VIEW</p><table class="bill-table"><thead><tr><th>User</th><th>Hours</th><th>Solo</th><th>Bill</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No play recorded this month.</td></tr>'}</tbody></table><p class="bill-totals">Server up ${Number(totals.server_up_hours || 0).toFixed(2)}h · actual ${money(currency, totals.actual_cost)} · charged ${money(currency, totals.charged)} · kitty ${money(currency, totals.kitty)}</p></div>`;
+  }
+  billingBody.innerHTML = `${yourShare}${admin}<p class="bill-note">Dry run — no money is charged. The kitty is the surplus from solo premiums that funds group discounts and fixed costs.</p>`;
 }
 
 function button(label, style, handler, disabled) {
@@ -356,6 +446,7 @@ async function load() {
   [catalog, instances, capacity, gameRequestPolicy] = await Promise.all([request('/api/catalog'), request('/api/instances'), request('/api/capacity'), request('/api/game-requests/policy')]);
   addGameButton.hidden = gameRequestPolicy.allowed !== true;
   render();
+  setupBilling();
 }
 
 async function refresh() {
@@ -377,6 +468,15 @@ async function refresh() {
 }
 
 document.querySelector('#refresh').addEventListener('click', refresh);
+billingInstanceSelect.addEventListener('change', (event) => {
+  billingSelection.key = event.target.value;
+  billingSelection.month = null;
+  loadBilling();
+});
+billingMonthSelect.addEventListener('change', (event) => {
+  billingSelection.month = event.target.value;
+  loadBilling();
+});
 addGameButton.addEventListener('click', openGameRequestDialog);
 document.querySelector('#game-request-cancel').addEventListener('click', () => gameRequestDialog.close());
 gameRequestForm.addEventListener('submit', submitGameRequest);

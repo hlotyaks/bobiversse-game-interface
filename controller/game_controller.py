@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import grp
+import importlib.util
 import json
 import logging
 import os
@@ -31,9 +32,10 @@ OPERATION_RETENTION = timedelta(hours=24)
 CRASH_LOOP_RESTART_THRESHOLD = 5
 CRASH_LOOP_AUTO_RESTART_THRESHOLD = max(1, CRASH_LOOP_RESTART_THRESHOLD - 2)
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 SECRET_PATTERN = re.compile(r"(?i)(password|pass|secret|token|api[_-]?key|key)\s*([=:])\s*[^\s,;]+")
 WRITE_ACTIONS = {"register_instance", "start", "restart"}
-READ_ACTIONS = {"list_catalog", "list_instances", "status", "health", "logs", "operation_status", "capacity", "backup_status"}
+READ_ACTIONS = {"list_catalog", "list_instances", "status", "health", "logs", "operation_status", "capacity", "backup_status", "billing"}
 
 
 class ControllerError(Exception):
@@ -95,17 +97,64 @@ def resolve_slot_from_catalog(catalog: dict[str, Any], template_id: Any, instanc
 
 
 class Controller:
-    def __init__(self, catalog_path: Path, state_path: Path, audit_path: Path) -> None:
+    def __init__(
+        self,
+        catalog_path: Path,
+        state_path: Path,
+        audit_path: Path,
+        presence_ledger: Path | None = None,
+        billing_config: Path | None = None,
+        billing_module: Path | None = None,
+    ) -> None:
         self.catalog_path = catalog_path
         self.state_path = state_path
         self.audit_path = audit_path
         self.operations_path = state_path.with_name("operations.json")
         self.backup_status_path = state_path.with_name("backup_status.json")
+        # Usage-metering read paths. The billing calculator (tools/billing.py) is installed next
+        # to this controller in the deployed layout, so default to a sibling module.
+        self.presence_ledger = presence_ledger or Path("/var/lib/game-server-interface/presence.jsonl")
+        self.billing_config_path = billing_config or Path("/etc/game-server-interface/billing.yaml")
+        self.billing_module_path = billing_module or Path(__file__).with_name("billing.py")
+        self._billing_module: Any = None
         self.lock = threading.RLock()
         self.operations: dict[str, dict[str, Any]] = {}
         self._ensure_paths()
         self._load_state()
         self._load_operations()
+
+    def _billing(self) -> Any:
+        """Load the billing calculator module once, on first use."""
+        if self._billing_module is None:
+            spec = importlib.util.spec_from_file_location("billing", self.billing_module_path)
+            if not spec or not spec.loader:
+                raise ControllerError("billing calculator is unavailable")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self._billing_module = module
+        return self._billing_module
+
+    def billing_report(self, template_id: Any, instance_id: Any, month: Any) -> dict[str, Any]:
+        """Compute the usage/cost-share report for one instance and month (dry run, no money).
+
+        Returns the full report (all users). The unprivileged interface is responsible for
+        showing a caller only their own line unless they are an administrator.
+        """
+        if not isinstance(template_id, str) or not ID_PATTERN.fullmatch(template_id):
+            raise ControllerError("invalid template ID")
+        if not isinstance(instance_id, str) or not ID_PATTERN.fullmatch(instance_id):
+            raise ControllerError("invalid instance ID")
+        if month is not None and (not isinstance(month, str) or not MONTH_PATTERN.fullmatch(month)):
+            raise ControllerError("invalid month")
+        billing = self._billing()
+        try:
+            config = yaml.safe_load(self.billing_config_path.read_text(encoding="utf-8")) if self.billing_config_path.exists() else {}
+        except (OSError, yaml.YAMLError) as exc:
+            raise ControllerError("billing config is unavailable") from exc
+        if not isinstance(config, dict):
+            raise ControllerError("billing config is invalid")
+        instance_key = f"{template_id}-{instance_id}"
+        return billing.build_report(self.presence_ledger, config, instance_key, month)
 
     @staticmethod
     def now() -> str:
@@ -548,6 +597,8 @@ class Controller:
                 payload = self.capacity_summary()
             elif action == "backup_status":
                 payload = self.backup_status()
+            elif action == "billing":
+                payload = self.billing_report(template_id, instance_id, request.get("month"))
             elif action == "logs":
                 payload = self.read_logs(self._registered(template_id, instance_id), request.get("tail", 50))
             else:

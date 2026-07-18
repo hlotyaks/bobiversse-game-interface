@@ -23,6 +23,7 @@ GAME_INTERFACE_ADMIN_LOGINS = frozenset(
 MAX_BODY_BYTES = 16_384
 MAX_CONTROLLER_RESPONSE_BYTES = 1_048_576
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 STEAM_APP_ID_PATTERN = re.compile(r"^(?:https://store\.steampowered\.com/app/)?([1-9][0-9]{0,9})(?:/[^?#]*)?/?(?:[?#].*)?$")
 MAX_PURPOSE_LENGTH = 500
 STATIC_ROOT = Path(__file__).parent / "static"
@@ -113,6 +114,47 @@ def log_request_params(path: str) -> dict[str, Any] | None:
     return payload
 
 
+def billing_request_params(path: str) -> dict[str, Any] | None:
+    query = parse_qs(urlparse(path).query, keep_blank_values=True)
+    template_ids = query.get("template_id", [])
+    instance_ids = query.get("instance_id", [])
+    months = query.get("month", [])
+    if len(template_ids) != 1 or len(instance_ids) != 1 or len(months) > 1:
+        return None
+    template_id, instance_id = template_ids[0], instance_ids[0]
+    if not valid_id(template_id) or not valid_id(instance_id):
+        return None
+    params: dict[str, Any] = {"template_id": template_id, "instance_id": instance_id}
+    if months and months[0]:
+        if not MONTH_PATTERN.fullmatch(months[0]):
+            return None
+        params["month"] = months[0]
+    return params
+
+
+def filter_billing_for_actor(report: dict[str, Any], actor: str, is_admin: bool) -> dict[str, Any]:
+    """Reduce a full billing report to what one viewer may see.
+
+    Everyone sees their own line (``you``) and the month/selector metadata. Only administrators
+    receive the full per-user breakdown and the aggregate totals (kitty, actual cost).
+    """
+    users = report.get("users") or {}
+    view: dict[str, Any] = {
+        "instance": report.get("instance"),
+        "month": report.get("month"),
+        "available_months": report.get("available_months", []),
+        "currency": report.get("currency"),
+        "run_cost_per_hour": report.get("run_cost_per_hour"),
+        "viewer": actor,
+        "is_admin": bool(is_admin),
+        "you": users.get(actor),
+    }
+    if is_admin:
+        view["users"] = users
+        view["totals"] = report.get("totals", {})
+    return view
+
+
 class InterfaceHandler(SimpleHTTPRequestHandler):
     server_version = "GameServerInterface/1"
 
@@ -171,6 +213,16 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
             payload = self.controller("capacity")
         elif path == "/api/backup-status":
             payload = self.controller("backup_status")
+        elif path == "/api/billing":
+            params = billing_request_params(self.path)
+            if params is None:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid billing request"})
+                return
+            result = self.controller("billing", **params)
+            if not result:
+                return
+            actor = request_actor(self.headers)
+            payload = {"result": filter_billing_for_actor(result["result"], actor, is_game_administrator(actor))}
         elif path == "/api/instances":
             instances = self.controller("list_instances")
             if not instances:
