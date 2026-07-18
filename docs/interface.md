@@ -40,12 +40,25 @@ The browser only reaches these same-origin routes:
 | `GET /api/capacity` | Current capacity reservations and admission limits. |
 | `GET /api/backup-status` | Latest backup verification summary. |
 | `GET /api/instances` | Registered slots with live `systemd` status. |
+| `GET /api/logs?template_id=<id>&instance_id=<id>&tail=<1-100>` | Redacted tail of the registered instance's systemd-unit journal; `tail` is optional and defaults to 50. |
 | `POST /api/instances` | Registers a catalog-defined slot only. |
 | `POST /api/actions/start` | Queues an asynchronous start. |
 | `POST /api/actions/restart` | Queues an asynchronous restart. |
 | `GET /api/operations/<id>` | Reads asynchronous operation state. |
 
 The UI shows registered and unregistered slots separately, exposes only catalog-provided ports, displays a copyable catalog-derived connection address for a registered game, and shows backup status and observed resource use. It disables lifecycle actions while services transition and asks for confirmation before registration, start, or restart. A registered slot remains `pending-provisioning` until a later root-reviewed workflow creates its exact service unit and secret file; the controller safely rejects a start of an absent unit.
+
+## Dashboard refresh behavior
+
+The browser refreshes the full catalog, instance-status, and capacity view every 10 seconds while the dashboard is visible. During a submitted start or restart operation, it checks the operation and refreshes the displayed state every 2 seconds for up to 60 checks; after a terminal result or timeout it returns to the 10-second cadence. A status label shows the last successful update or a retry condition, and **Refresh status** remains available for an immediate manual update.
+
+Automatic requests pause while the tab is hidden and the dashboard performs an immediate refresh when it becomes visible again. This is browser-only polling over the scoped API: it does not add a controller capability, WebSocket, or server-sent-event connection, and it never retries lifecycle actions.
+
+## Server console
+
+Each registered instance always displays an expandable **Server logs** control. While a submitted start or restart is in progress, the dashboard reads a small recent tail from the instance's systemd journal at the existing two-second operation-refresh cadence. A successful operation collapses its startup console; a failed operation retains its final output for diagnosis. Outside a lifecycle operation, opening the control fetches up to 100 lines once; running instances are not continuously polled for logs.
+
+The controller, not the browser, resolves the registered instance to its allowlisted systemd unit, limits output to 100 lines, applies its secret-value redaction, and records the request in the audit log. The output is a unit-journal tail only: it is not a raw export, historical search facility, or adapter for game-specific file logs.
 
 ## Tailnet identity
 

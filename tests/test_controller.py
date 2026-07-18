@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 MODULE_PATH = Path(__file__).parents[1] / "controller" / "game_controller.py"
 SPEC = importlib.util.spec_from_file_location("game_controller", MODULE_PATH)
@@ -55,6 +56,15 @@ class ControllerContractTests(unittest.TestCase):
             "token:<redacted>",
         )
 
+    def test_log_reader_bounds_tail_and_redacts_journal_output(self) -> None:
+        instance = self.controller.register_instance("valheim", "primary")
+        completed = subprocess.CompletedProcess([], 0, "2026-07-17 password=not-safe\nready\n", "")
+        with patch.object(MODULE.subprocess, "run", return_value=completed) as run:
+            logs = self.controller.read_logs(instance, 999)
+        self.assertEqual(logs["lines"], ["2026-07-17 password=<redacted>", "ready"])
+        self.assertEqual(run.call_args.args[0][-1], str(MODULE.MAX_LOG_LINES))
+        self.assertEqual(run.call_args.kwargs["timeout"], 20)
+
     def test_capacity_policy_rejects_excess_cpu_reservation(self) -> None:
         catalog = MODULE.yaml.safe_load(self.catalog.read_text())
         catalog["capacity_policy"]["admission_limits"]["cpu_cores"] = 1
@@ -85,6 +95,23 @@ class ControllerContractTests(unittest.TestCase):
             self.controller._systemctl = original
         self.assertTrue(status["crash_loop"])
         self.assertEqual(status["restart_count_recent"], 3)
+
+    def test_game_request_is_audited_without_creating_instance_state(self) -> None:
+        response = self.controller.dispatch(
+            {"action": "create_game_request", "actor": "admin@example.test", "steam_app_id": 1203620, "requested_slug": "enshrouded"},
+            peer_uid=995,
+        )
+        self.assertEqual(response["result"]["steam_app_id"], 1203620)
+        self.assertEqual(self.controller.instances, {})
+        audit = self.controller.audit_path.read_text(encoding="utf-8")
+        self.assertIn('"action":"create_game_request"', audit)
+        self.assertIn('"result":"accepted"', audit)
+
+    def test_game_request_rejects_unsafe_values(self) -> None:
+        with self.assertRaises(MODULE.ControllerError):
+            self.controller.create_game_request(True, "enshrouded")
+        with self.assertRaises(MODULE.ControllerError):
+            self.controller.create_game_request(1203620, "Enshrouded")
 
 
 if __name__ == "__main__":

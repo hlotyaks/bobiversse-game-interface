@@ -2,13 +2,38 @@
 
 Use this file to record proposed functionality and rollout work. Each item should state its scope, safety boundary, validation criteria, and whether it needs a maintenance window or an external test device. Do not record passwords, tokens, player data, or backup contents here.
 
-## Phase 7 remaining rollout work
+## Page refresh
+
+- **Status:** Implemented with browser-only hybrid polling.
+- **Scope:** Refresh the catalog, instance status, and capacity view every 10 seconds while the visible dashboard is idle; use a 2-second cadence during a submitted start or restart operation. Show the latest update status and retain manual refresh.
+- **Boundary:** Pause automatic requests in hidden tabs. Do not add a controller action, API route, WebSocket, server-sent-event stream, or automatic lifecycle retry.
+- **Pass criteria:** Transitioning states become visible without manual intervention, no overlapping refresh requests occur, hidden tabs send no automatic requests, and showing the tab triggers an immediate refresh.
+
+## Server console window
+
+- **Status:** Implemented with redacted systemd-journal tails.
+- **Scope:** Always show an expandable **Server logs** control for each registered instance. During startup/restart it refreshes at the existing two-second operation cadence; otherwise it reads logs only when expanded. Collapse successful startup output, retain failed-operation output for diagnosis, and do not continuously poll running-server logs.
+- **Boundary:** The browser can read only the registered instance's allowlisted systemd unit through the controller. The controller limits output to 100 lines, redacts common secret-value formats, audits access, and does not expose raw exports, file-log adapters, WebSockets, or server-sent events. All dashboard-authorized users see the same redacted output.
+- **Pass criteria:** Startup progress appears without overlapping requests; hidden tabs make no automatic requests; successful operations remove their startup console; failed operations retain final output; active-server log viewing fetches only on user request; log text cannot inject markup.
+- **Maintenance:** No maintenance window or external test device is required for interface validation. Validate against a registered test instance before broad rollout.
+
+## Add new game button
+
+- **Status:** Initial administrator-only request export is implemented; catalog integration and provisioning remain a reviewed follow-up.
+- **Scope:** An allowlisted Tailscale administrator can provide a Steam Store URL/app ID, catalog slug, and short purpose, then download a bounded request artifact. An operator runs `tools/fetch_steam_metadata.py` outside the deployed interface to produce advisory Steam metadata and a deliberately incomplete catalog draft for a Git pull request.
+- **Boundary:** The browser, interface, and controller do not fetch Steam metadata, store a Steam API key, edit the catalog, select images/digests/ports/resources, create an adapter, provision an account, write secrets, change firewall rules, register an instance, or start a server. The controller audits only the request's safe identifiers and result, not its free-text purpose or Steam response.
+- **Pass criteria:** The control is visible only to the root-configured Tailscale-login allowlist and the endpoint rejects every other actor; exported requests are canonical and bounded; the CLI strips HTML and fails closed on invalid Steam responses; generated drafts remain disabled and fail catalog validation until a reviewer completes all required deployment fields; a PR review is required before catalog deployment.
+- **Maintenance:** No game-world outage is needed for request/export validation. A real game requires a separate maintenance and rollout plan covering renderer/provisioning support, backup/restore, firewall/Tailscale policy, capacity, lifecycle validation, and client connection testing.
+## Phase 7 verified rollout work
 
 ### Approved friend-device acceptance test
 
+- **Status:** Verified on 2026-07-17 with an approved friend device able to connect to the intended secondary Enshrouded world.
 - **Scope:** From a separately managed, approved tailnet device, open `https://bobiverse.tail40344b.ts.net/`, view the catalog, use the dashboard connection address, and join only the intended Enshrouded world.
 - **Boundary:** Use `enshrouded:secondary` for the lifecycle action and game-connectivity test; do not restart or modify `primary`.
 - **Pass criteria:** HTTPS works through MagicDNS, the dashboard shows the secondary address `100.84.161.38:15640`, the friend can connect on the approved UDP port, and the controller audit log records the friend's `Tailscale-User-Login` after an allowed dashboard action.
+
+## Phase 7 remaining rollout work
 
 ### Denied-access test
 

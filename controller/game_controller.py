@@ -272,6 +272,14 @@ class Controller:
             self._save_state()
         return self.instances[key]
 
+    def create_game_request(self, steam_app_id: Any, requested_slug: Any) -> dict[str, Any]:
+        """Audit a bounded proposal without creating deployable host state."""
+        if not isinstance(steam_app_id, int) or isinstance(steam_app_id, bool) or not 1 <= steam_app_id <= 2_147_483_647:
+            raise ControllerError("invalid Steam app ID")
+        if not isinstance(requested_slug, str) or not ID_PATTERN.fullmatch(requested_slug):
+            raise ControllerError("invalid requested catalog slug")
+        return {"steam_app_id": steam_app_id, "requested_slug": requested_slug, "created_at": self.now()}
+
     def _registered(self, template_id: Any, instance_id: Any) -> dict[str, Any]:
         if not isinstance(template_id, str) or not isinstance(instance_id, str):
             raise ControllerError("template_id and instance_id are required")
@@ -515,7 +523,7 @@ class Controller:
 
     def dispatch(self, request: dict[str, Any], peer_uid: int) -> dict[str, Any]:
         action = request.get("action")
-        if action not in WRITE_ACTIONS | READ_ACTIONS:
+        if action not in WRITE_ACTIONS | READ_ACTIONS | {"create_game_request"}:
             raise ControllerError("unsupported action")
         actor = request.get("actor", "api-unattributed")
         if not isinstance(actor, str) or len(actor) > 256:
@@ -528,6 +536,8 @@ class Controller:
                 payload = list(self.instances.values())
             elif action == "register_instance":
                 payload = self.register_instance(template_id, instance_id)
+            elif action == "create_game_request":
+                payload = self.create_game_request(request.get("steam_app_id"), request.get("requested_slug"))
             elif action in {"start", "restart"}:
                 payload = self.submit_lifecycle(action, template_id, instance_id, actor)
             elif action == "status":

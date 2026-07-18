@@ -54,6 +54,12 @@ After a host reboot, verify Docker, controller, interface, Serve, backup timer, 
 - **Disable an unstable instance:** stop its systemd unit, retain its latest verified backup, and remove or disable its catalog slot through a reviewed catalog change. Do not delete data until the retention decision is recorded.
 - **Retire an instance:** stop it, verify and retain the final backup, remove its systemd unit and firewall publication, then remove its catalog slot only after the retention period.
 
+## New game requests
+
+Configure `GAME_INTERFACE_ADMIN_LOGINS` as a root-owned, comma-separated list of exact Tailscale login values alongside `TRUSTED_ACTOR_HEADER=1` before exposing the dashboard request control. An empty allowlist denies every request. After changing either value, redeploy the interface configuration and verify an allowlisted administrator sees **Add new game** while an ordinary dashboard user does not.
+
+The button downloads a review request; it does not alter host state. Move that file to a controlled operator workstation and run `tools/fetch_steam_metadata.py` to create the Steam review package. Review the generated disabled skeleton, implement the required adapter and tests, and open a Git pull request. Discard an unwanted request or branch to roll back: no catalog, game data, account, secret, firewall, or service state has changed before the normal reviewed catalog deployment and root provisioning steps.
+
 ## Tailnet member revocation
 
 Remove the person or their device in the Tailscale admin console, review access-control rules, and verify they can no longer reach HTTPS 443 or any approved game port. Tailscale identity remains in append-only audit history; do not edit audit records.
