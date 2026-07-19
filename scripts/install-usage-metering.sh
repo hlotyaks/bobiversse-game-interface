@@ -31,6 +31,16 @@ else
   echo "keeping existing /etc/game-server-interface/billing.yaml"
 fi
 
+# Per-game presence exclusions. Seed the initial map (Enshrouded excludes the non-playing admin) but
+# never overwrite the live copy: after install it is owned by the controller and edited by admins via
+# the interface. The controller (running as root) rewrites it atomically; the meter re-reads it each
+# cycle. Root-owned and 0600 like the ledger -- it is playtime/config metadata, not world data.
+if [[ ! -e /var/lib/game-server-interface/presence-exclusions.json ]]; then
+  install -o root -g root -m 0600 "${repo_root}/deploy/var/lib/game-server-interface/presence-exclusions.json" /var/lib/game-server-interface/presence-exclusions.json
+else
+  echo "keeping existing /var/lib/game-server-interface/presence-exclusions.json"
+fi
+
 install -o root -g root -m 0644 "${repo_root}/deploy/etc/systemd/system/game-presence-meter.service" /etc/systemd/system/game-presence-meter.service
 
 systemctl daemon-reload

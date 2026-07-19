@@ -194,6 +194,54 @@ class ExcludeLoginTests(unittest.TestCase):
         self.assertNotIn("hlotyaks@github", [u for r in rows for u in r["present"]])
 
 
+class PerGameExclusionTests(unittest.TestCase):
+    def test_load_exclusions_parses_map(self) -> None:
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "ex.json"
+            path.write_text(json.dumps({"schema_version": 1, "exclusions": {"enshrouded": ["hlotyaks@github"]}}))
+            loaded = METER.load_exclusions(path)
+        self.assertEqual(loaded, {"enshrouded": frozenset({"hlotyaks@github"})})
+
+    def test_load_exclusions_missing_or_malformed_is_empty(self) -> None:
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / "absent.json"
+            self.assertEqual(METER.load_exclusions(missing), {})
+            bad = Path(d) / "bad.json"
+            bad.write_text("{not json")
+            self.assertEqual(METER.load_exclusions(bad), {})
+            wrong = Path(d) / "wrong.json"
+            wrong.write_text(json.dumps({"exclusions": ["not", "a", "map"]}))
+            self.assertEqual(METER.load_exclusions(wrong), {})
+
+    def test_per_game_exclusion_only_affects_its_game(self) -> None:
+        # hlotyaks out-traffics the real player and is excluded from enshrouded but NOT valheim.
+        # The enshrouded slot must go to the player; if valheim had a reader, hlotyaks could still take it.
+        import tempfile, json, yaml
+        from pathlib import Path
+        status = {"User": {"2": {"LoginName": "player@ex"}, "9": {"LoginName": "hlotyaks@github"}},
+                  "Peer": {"p": {"UserID": 2, "Active": True, "RxBytes": 1_100_000, "TxBytes": 0},
+                           "a": {"UserID": 9, "Active": True, "RxBytes": 9_000_000, "TxBytes": 0}}}
+        catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "p.jsonl"
+            state = {"bytes": {"player@ex": 1_000_000, "hlotyaks@github": 1_000_000}, "rate_ewma": {}, "t": 0.0}
+            with unittest.mock.patch.object(METER, "_run", return_value=json.dumps(status)), \
+                 unittest.mock.patch.object(METER, "is_unit_active", return_value=True), \
+                 unittest.mock.patch.object(METER, "instance_client_count", return_value=1), \
+                 unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
+                METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
+                                          template_exclusions={"enshrouded": frozenset({"hlotyaks@github"})})
+            rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+        primary = [r for r in rows if r["instance"] == "enshrouded-primary"]
+        self.assertTrue(primary and primary[0]["present"] == ["player@ex"])
+        # hlotyaks is not globally dropped -- he remains a ranked peer available to other games.
+        self.assertIn("hlotyaks@github", state["bytes"])
+
+
 class CatalogPortTests(unittest.TestCase):
     def test_instance_ports_from_real_catalog(self) -> None:
         import yaml

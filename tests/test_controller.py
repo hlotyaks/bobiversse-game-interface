@@ -146,5 +146,66 @@ class ControllerContractTests(unittest.TestCase):
             self.controller.create_game_request(1203620, "Enshrouded")
 
 
+class ExclusionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        catalog = root / "catalog.yaml"
+        shutil.copy(Path(__file__).parents[1] / "deploy/etc/game-server-interface/catalog.yaml", catalog)
+        self.controller = MODULE.Controller(catalog, root / "state/instances.json", root / "log/audit.jsonl")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_exclusions_start_empty(self) -> None:
+        self.assertEqual(self.controller.list_exclusions(), {"schema_version": 1, "exclusions": {}})
+
+    def test_set_exclusions_round_trips_per_template(self) -> None:
+        self.controller.set_exclusions("enshrouded", ["hlotyaks@github"])
+        self.assertEqual(self.controller.list_exclusions()["exclusions"], {"enshrouded": ["hlotyaks@github"]})
+        # A fresh controller reads the persisted file, proving it survives a restart.
+        reloaded = MODULE.Controller(self.controller.catalog_path, self.controller.state_path, self.controller.audit_path)
+        self.assertEqual(reloaded.list_exclusions()["exclusions"], {"enshrouded": ["hlotyaks@github"]})
+
+    def test_set_exclusions_dedupes_and_sorts(self) -> None:
+        result = self.controller.set_exclusions("enshrouded", ["b@github", "a@github", "b@github"])
+        self.assertEqual(result["exclusions"]["enshrouded"], ["a@github", "b@github"])
+
+    def test_empty_list_clears_a_template(self) -> None:
+        self.controller.set_exclusions("enshrouded", ["hlotyaks@github"])
+        self.controller.set_exclusions("enshrouded", [])
+        self.assertEqual(self.controller.list_exclusions()["exclusions"], {})
+
+    def test_per_template_exclusions_are_independent(self) -> None:
+        self.controller.set_exclusions("enshrouded", ["hlotyaks@github"])
+        self.controller.set_exclusions("valheim", ["someone@github"])
+        self.assertEqual(
+            self.controller.list_exclusions()["exclusions"],
+            {"enshrouded": ["hlotyaks@github"], "valheim": ["someone@github"]},
+        )
+
+    def test_unknown_template_is_rejected(self) -> None:
+        with self.assertRaises(MODULE.ControllerError):
+            self.controller.set_exclusions("nonexistent", ["a@github"])
+
+    def test_malformed_login_is_rejected(self) -> None:
+        with self.assertRaises(MODULE.ControllerError):
+            self.controller.set_exclusions("enshrouded", ["not a login"])
+        with self.assertRaises(MODULE.ControllerError):
+            self.controller.set_exclusions("enshrouded", [123])
+
+    def test_too_many_exclusions_are_rejected(self) -> None:
+        with self.assertRaises(MODULE.ControllerError):
+            self.controller.set_exclusions("enshrouded", [f"user{i}@github" for i in range(MODULE.MAX_EXCLUSIONS_PER_TEMPLATE + 1)])
+
+    def test_set_and_list_dispatch_actions_are_audited(self) -> None:
+        self.controller.dispatch({"action": "set_exclusions", "actor": "admin@example.test", "template_id": "enshrouded", "logins": ["hlotyaks@github"]}, peer_uid=995)
+        listed = self.controller.dispatch({"action": "list_exclusions", "actor": "admin@example.test"}, peer_uid=995)
+        self.assertEqual(listed["result"]["exclusions"], {"enshrouded": ["hlotyaks@github"]})
+        audit = self.controller.audit_path.read_text(encoding="utf-8")
+        self.assertIn('"action":"set_exclusions"', audit)
+        self.assertIn('"action":"list_exclusions"', audit)
+
+
 if __name__ == "__main__":
     unittest.main()

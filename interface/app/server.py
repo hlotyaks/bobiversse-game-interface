@@ -24,6 +24,8 @@ MAX_BODY_BYTES = 16_384
 MAX_CONTROLLER_RESPONSE_BYTES = 1_048_576
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$")
+MAX_EXCLUSIONS_PER_TEMPLATE = 64
 STEAM_APP_ID_PATTERN = re.compile(r"^(?:https://store\.steampowered\.com/app/)?([1-9][0-9]{0,9})(?:/[^?#]*)?/?(?:[?#].*)?$")
 MAX_PURPOSE_LENGTH = 500
 STATIC_ROOT = Path(__file__).parent / "static"
@@ -89,6 +91,23 @@ def game_request_params(body: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(purpose, str) or len(purpose) > MAX_PURPOSE_LENGTH or any(character in purpose for character in "\r\n"):
         return None
     return {"steam_app_id": app_id, "steam_url": f"https://store.steampowered.com/app/{app_id}/", "requested_slug": requested_slug, "purpose": purpose.strip()}
+
+
+def exclusion_params(body: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate a set-exclusions request: a valid template ID and a bounded list of tailnet logins."""
+    template_id = body.get("template_id")
+    logins = body.get("logins")
+    if not valid_id(template_id):
+        return None
+    if not isinstance(logins, list) or len(logins) > MAX_EXCLUSIONS_PER_TEMPLATE:
+        return None
+    cleaned: list[str] = []
+    for login in logins:
+        if not isinstance(login, str) or len(login) > 256 or not LOGIN_PATTERN.fullmatch(login):
+            return None
+        if login not in cleaned:
+            cleaned.append(login)
+    return {"template_id": template_id, "logins": cleaned}
 
 
 def is_game_administrator(actor: str) -> bool:
@@ -223,6 +242,12 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
                 return
             actor = request_actor(self.headers)
             payload = {"result": filter_billing_for_actor(result["result"], actor, is_game_administrator(actor))}
+        elif path == "/api/exclusions":
+            actor = request_actor(self.headers)
+            if not is_game_administrator(actor):
+                self.send_json(HTTPStatus.FORBIDDEN, {"error": "managing player exclusions requires an authorized tailnet administrator"})
+                return
+            payload = self.controller("list_exclusions")
         elif path == "/api/instances":
             instances = self.controller("list_instances")
             if not instances:
@@ -271,6 +296,17 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
             status = HTTPStatus.CREATED
             if payload:
                 payload["result"] = {**payload["result"], **params, "schema_version": 1, "requester": actor}
+        elif path == "/api/exclusions":
+            actor = request_actor(self.headers)
+            if not is_game_administrator(actor):
+                self.send_json(HTTPStatus.FORBIDDEN, {"error": "managing player exclusions requires an authorized tailnet administrator"})
+                return
+            params = exclusion_params(body)
+            if params is None:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": "provide a valid template ID and a list of tailnet logins"})
+                return
+            payload = self.controller("set_exclusions", template_id=params["template_id"], logins=params["logins"])
+            status = HTTPStatus.OK
         else:
             template_id, instance_id = body.get("template_id"), body.get("instance_id")
             if not valid_id(template_id) or not valid_id(instance_id):
