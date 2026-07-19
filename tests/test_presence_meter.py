@@ -136,11 +136,26 @@ class EnshroudedOccupancyTests(unittest.TestCase):
 
 
 class AttributionTests(unittest.TestCase):
-    def test_rank_by_rate_orders_all_peers_no_threshold(self) -> None:
+    def test_ewma_ranks_by_smoothed_rate(self) -> None:
         current = {"a@ex": {"bytes": 5_000_000}, "b@ex": {"bytes": 2_000_000}, "c@ex": {"bytes": 1_010_000}}
         previous = {"a@ex": 1_000_000, "b@ex": 1_000_000, "c@ex": 1_000_000}  # +4MB, +1MB, +10KB
-        ranked = METER.rank_logins_by_rate(current, previous, dt=60.0)
-        self.assertEqual([login for _, login in ranked], ["a@ex", "b@ex", "c@ex"])
+        ewma = METER.update_rate_ewma({}, current, previous, dt=60.0, alpha=0.5)
+        self.assertEqual([login for _, login in METER.rank_by_smoothed_rate(ewma)], ["a@ex", "b@ex", "c@ex"])
+
+    def test_ewma_keeps_a_steady_player_ahead_through_a_counter_reset(self) -> None:
+        # The regression: a solo player (a@ex) whose tailscale counter resets for one cycle must not
+        # yield its slot to an idle-but-active bystander (b@ex) that happens to tick up that cycle.
+        steady = {"a@ex": 30.0, "b@ex": 0.0}  # a@ex has a strong smoothed lead
+        current = {"a@ex": {"bytes": 500}, "b@ex": {"bytes": 2_000_000}}   # a@ex reset (< prior), b@ex +little
+        previous = {"a@ex": 9_000_000, "b@ex": 1_990_000}
+        ewma = METER.update_rate_ewma(steady, current, previous, dt=60.0, alpha=0.5)
+        top = METER.attribute_by_count(METER.rank_by_smoothed_rate(ewma), 1, floor_kbps=1.0)
+        self.assertEqual(top, ["a@ex"])  # steady player retained despite its reset
+
+    def test_ewma_reset_decays_not_drops(self) -> None:
+        # A reset counts as 0 for the cycle (halved at alpha=0.5), not removed from the ranking.
+        ewma = METER.update_rate_ewma({"a@ex": 20.0}, {"a@ex": {"bytes": 1}}, {"a@ex": 999}, dt=60.0, alpha=0.5)
+        self.assertAlmostEqual(ewma["a@ex"], 10.0, places=6)
 
     def test_attribute_takes_top_n_by_count(self) -> None:
         ranked = [(300.0, "a@ex"), (120.0, "b@ex"), (60.0, "c@ex")]

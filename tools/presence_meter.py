@@ -52,6 +52,10 @@ DEFAULT_MIN_KBPS = 25.0
 # so a stale count can never invent a phantom player; it is not the player/idle discriminator
 # the old min-kbps threshold tried (and failed) to be -- the game's count is that discriminator.
 DEFAULT_ATTRIBUTION_FLOOR_KBPS = 1.0
+# Weight on the newest 60s sample when smoothing per-peer traffic rate (EWMA). Lower = steadier;
+# 0.5 keeps a real player ranked ahead of an idle peer's one-cycle burst or the player's own
+# transient tailscale counter reset (both observed misattributing a solo slot on 2026-07-19).
+DEFAULT_RATE_SMOOTHING = 0.5
 
 
 # --------------------------------------------------------------------------- shared
@@ -148,30 +152,36 @@ def playing_logins(current: dict[str, dict[str, Any]], previous_bytes: dict[str,
     return [login for _, login in ranked]
 
 
-def rank_logins_by_rate(current: dict[str, dict[str, Any]], previous_bytes: dict[str, int], dt: float) -> list[tuple[float, str]]:
-    """Rank logins by traffic rate (kbps) since the last sample, highest first.
+def update_rate_ewma(previous_ewma: dict[str, float], current: dict[str, dict[str, Any]], previous_bytes: dict[str, int], dt: float, alpha: float) -> dict[str, float]:
+    """Return each login's exponentially-smoothed traffic rate (kbps).
 
-    Unlike ``playing_logins`` this applies no threshold and no ``Active`` gate -- it is the identity
-    ranking used together with a game-reported client count. A login with no prior sample (first
-    cycle, or a reconnect that reset counters) is skipped rather than guessed.
+    Identity is assigned by *ranking* peers, so a single noisy 60s delta must not flip a slot to the
+    wrong person. A tailscale re-handshake resets a peer's byte counters (negative delta), and an
+    idle-but-``Active`` peer can burst for one cycle -- both were observed misattributing a solo
+    player's slot to a bystander (hlotyaks). Smoothing over a few cycles fixes both: a reset/miss
+    counts as 0 for that cycle (the login decays but is not dropped, so a steady player keeps its
+    lead), and a lone burst barely moves an otherwise-idle peer. ``alpha`` is the weight on the
+    newest sample (higher = less smoothing). Only currently-present logins are carried forward, so a
+    peer that leaves the tailnet ages out.
     """
-    if dt <= 0:
-        return []
-    ranked: list[tuple[float, str]] = []
+    ewma: dict[str, float] = {}
     for login, info in current.items():
         prior = previous_bytes.get(login)
-        if prior is None:
-            continue
-        delta = int(info["bytes"]) - int(prior)
-        if delta < 0:
-            continue
-        ranked.append(((delta * 8) / 1000.0 / dt, login))
-    ranked.sort(reverse=True)
-    return ranked
+        if dt <= 0 or prior is None or int(info["bytes"]) < int(prior):
+            instant = 0.0  # unknown/reset this cycle -> decay, don't drop
+        else:
+            instant = ((int(info["bytes"]) - int(prior)) * 8) / 1000.0 / dt
+        ewma[login] = alpha * instant + (1 - alpha) * previous_ewma.get(login, 0.0)
+    return ewma
+
+
+def rank_by_smoothed_rate(ewma: dict[str, float]) -> list[tuple[float, str]]:
+    """Rank logins by smoothed traffic rate, highest first."""
+    return sorted(((rate, login) for login, rate in ewma.items()), reverse=True)
 
 
 def attribute_by_count(ranked: list[tuple[float, str]], count: int, floor_kbps: float) -> list[str]:
-    """Assign identities to ``count`` connected clients: the top-``count`` peers by traffic rate.
+    """Assign identities to ``count`` connected clients: the top-``count`` peers by (smoothed) rate.
 
     Peers at or below ``floor_kbps`` are dropped so a stale/lagging count never attributes play to
     an idle peer -- we would rather under-report by one than bill the wrong person. Returned sorted.
@@ -244,7 +254,7 @@ def instance_templates(catalog: dict[str, Any]) -> dict[str, str]:
     return mapping
 
 
-def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS) -> None:
+def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS, alpha: float = DEFAULT_RATE_SMOOTHING) -> None:
     status_raw = _run([tailscale_bin, "status", "--json"])
     try:
         peers = parse_status_peers(json.loads(status_raw)) if status_raw else {}
@@ -253,7 +263,8 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
     now_mono = time.monotonic()
     dt = (now_mono - state["t"]) if state.get("t") is not None else 0.0
     previous_bytes = state.get("bytes", {})
-    ranked = rank_logins_by_rate(peers, previous_bytes, dt)
+    ewma = update_rate_ewma(state.get("rate_ewma", {}), peers, previous_bytes, dt, alpha)
+    ranked = rank_by_smoothed_rate(ewma)
     templates = instance_templates(catalog)
     for key in instance_ports(catalog):
         if not is_unit_active(key, systemctl_bin):
@@ -268,6 +279,7 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
                 present = playing_logins(peers, previous_bytes, dt, min_kbps)
         append_ledger(ledger_path, {"ts": now(), "instance": key, "present": present})
     state["bytes"] = {login: int(info["bytes"]) for login, info in peers.items()}
+    state["rate_ewma"] = ewma
     state["t"] = now_mono
 
 
@@ -363,7 +375,7 @@ def main() -> int:
         print(f"presence meter failed to load catalog: {exc}", file=sys.stderr)
         return 1
 
-    state: dict[str, Any] = {"bytes": {}, "t": None}
+    state: dict[str, Any] = {"bytes": {}, "rate_ewma": {}, "t": None}
 
     def cycle() -> None:
         if args.source == "conntrack":
