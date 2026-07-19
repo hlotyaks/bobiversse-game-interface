@@ -83,23 +83,37 @@ if ! git_user merge-base --is-ancestor "${PREV}" "${NEW}"; then
     exit 1
 fi
 
+# Run the installers for the diff, then health-check -- logging which of the two failed so a bad
+# deploy is diagnosable from the journal without a trace run.
+apply() {
+    if ! bash "${CLONE}/scripts/deploy.sh" "$1" "$2"; then
+        log "installer (deploy.sh) exited non-zero"
+        return 1
+    fi
+    if ! health_check; then
+        log "installers ran but the health check did not pass"
+        return 1
+    fi
+    return 0
+}
+
 log "deploying ${PREV:0:12} -> ${NEW:0:12} on ${BRANCH}"
 git_user reset --hard --quiet "${NEW}"
 
-if bash "${CLONE}/scripts/deploy.sh" "${PREV}" "${NEW}" && health_check; then
+if apply "${PREV}" "${NEW}"; then
     log "deploy healthy at ${NEW:0:12}"
     write_status "deployed" "${PREV}" "${NEW}" "healthy"
     exit 0
 fi
 
-log "deploy of ${NEW:0:12} failed health check; rolling back to ${PREV:0:12}"
+log "deploy of ${NEW:0:12} failed; rolling back to ${PREV:0:12}"
 git_user reset --hard --quiet "${PREV}"
-if bash "${CLONE}/scripts/deploy.sh" "${NEW}" "${PREV}" && health_check; then
-    log "ROLLED BACK to ${PREV:0:12}; the bad commit ${NEW:0:12} is deployed on origin/${BRANCH} but NOT running"
-    write_status "rolled_back" "${NEW}" "${PREV}" "new commit failed health check; reverted to previous"
+if apply "${NEW}" "${PREV}"; then
+    log "ROLLED BACK to ${PREV:0:12}; the bad commit ${NEW:0:12} is on origin/${BRANCH} but NOT running"
+    write_status "rolled_back" "${NEW}" "${PREV}" "new commit failed; reverted to previous"
     exit 1
 fi
 
-log "CRITICAL: rollback to ${PREV:0:12} also failed health check; manual intervention required"
-write_status "rollback_failed" "${NEW}" "${PREV}" "both new and previous commit failed health check"
+log "CRITICAL: rollback to ${PREV:0:12} also failed; manual intervention required"
+write_status "rollback_failed" "${NEW}" "${PREV}" "both new and previous commit failed to deploy"
 exit 2

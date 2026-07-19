@@ -30,11 +30,20 @@ systemctl daemon-reload
 systemctl enable game-server-interface.service
 systemctl restart game-server-interface.service
 systemctl is-active --quiet game-server-interface.service
-for _ in $(seq 1 30); do
-    if [[ -S /run/game-server-interface/web/interface.sock ]]; then
+# Wait until the (re)started container actually answers /healthz. Waiting only for the socket file
+# to appear is not enough: on a restart, a stale socket from the previous container can linger on the
+# bind mount, so a single probe races the new server and fails to connect (curl exit 7). Retry the
+# real health probe. This matters for unattended restarts (auto-deploy), not just first install.
+healthy=0
+for _ in $(seq 1 60); do
+    if curl --max-time 5 --unix-socket /run/game-server-interface/web/interface.sock --fail --silent http://localhost/healthz >/dev/null 2>&1; then
+        healthy=1
         break
     fi
     sleep 1
 done
-curl --unix-socket /run/game-server-interface/web/interface.sock --fail --silent http://localhost/healthz >/dev/null
+if [[ ${healthy} -ne 1 ]]; then
+    echo "interface did not answer /healthz within 60s of restart" >&2
+    exit 1
+fi
 printf 'Phase 3 interface is active behind its protected Unix socket. Do not publish it until Phase 5.\n'
