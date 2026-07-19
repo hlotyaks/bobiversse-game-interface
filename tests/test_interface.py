@@ -115,5 +115,25 @@ class BillingRouteTests(unittest.TestCase):
         self.assertIsNone(view["you"])  # admin themselves did not play
 
 
+class ExclusionRouteTests(unittest.TestCase):
+    def test_valid_exclusion_body_is_cleaned(self) -> None:
+        self.assertEqual(
+            MODULE.exclusion_params({"template_id": "enshrouded", "logins": ["a@github", "b@github", "a@github"]}),
+            {"template_id": "enshrouded", "logins": ["a@github", "b@github"]},
+        )
+        self.assertEqual(
+            MODULE.exclusion_params({"template_id": "enshrouded", "logins": []}),
+            {"template_id": "enshrouded", "logins": []},
+        )
+
+    def test_invalid_exclusion_bodies_are_rejected(self) -> None:
+        self.assertIsNone(MODULE.exclusion_params({"template_id": "Bad-ID", "logins": []}))
+        self.assertIsNone(MODULE.exclusion_params({"template_id": "enshrouded", "logins": "notalist"}))
+        self.assertIsNone(MODULE.exclusion_params({"template_id": "enshrouded", "logins": ["no spaces allowed"]}))
+        self.assertIsNone(MODULE.exclusion_params({"template_id": "enshrouded", "logins": ["missing-at-sign"]}))
+        self.assertIsNone(MODULE.exclusion_params({"template_id": "enshrouded", "logins": [123]}))
+        self.assertIsNone(MODULE.exclusion_params({"template_id": "enshrouded", "logins": [f"u{i}@github" for i in range(MODULE.MAX_EXCLUSIONS_PER_TEMPLATE + 1)]}))
+
+
 if __name__ == "__main__":
     unittest.main()

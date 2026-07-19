@@ -45,9 +45,18 @@ that honest:
   tailscale counter reset no longer flips a slot to the wrong person (observed crediting a solo
   player's time to a bystander before smoothing).
 - **Exclusions.** Some tailnet peers are *never* players — a server admin or dashboard-only user
-  whose HTTPS/SSH traffic to the host is indistinguishable by volume from game traffic. List them
-  with `--exclude-login <login>` (repeatable) in the meter's unit; they are dropped before
-  attribution so the game's slots go to actual players.
+  whose HTTPS/SSH traffic to the host is indistinguishable by volume from game traffic. There are
+  two ways to exclude them, both applied before attribution so a game's slots go to actual players:
+  - **Per-game (preferred), admin-managed at runtime.** An administrator edits the exclusion list
+    for each game on the dashboard's **Exclusions** page (a login excluded from Enshrouded can still
+    be metered as a player of other games). This writes the controller-managed
+    `/var/lib/game-server-interface/presence-exclusions.json` (`{template_id: [logins]}`); the meter
+    re-reads it every cycle, so a change takes effect within a minute with **no restart**. Seeded on
+    install with `enshrouded → hlotyaks@github` (the non-playing admin); the installer never
+    overwrites the live file. Under the hood: interface `GET`/`POST /api/exclusions` (admin-gated) →
+    controller `list_exclusions` / `set_exclusions` (validated, atomic, audited).
+  - **Global.** `--exclude-login <login>` (repeatable) in the meter's unit drops a login from *every*
+    game — use it only for an account that is never a player of anything (e.g. a monitoring bot).
 
 Correcting a bad capture after the fact (e.g. a mis-attributed login from before an exclusion was
 added): `sudo /usr/local/libexec/game-server-interface/ledger_admin.py --remove-login <login>`
@@ -130,7 +139,12 @@ wrongly counted, raise it. Background on why this replaced the conntrack source 
 
 ## Web dashboard
 
-The dashboard shows a **Your bill** panel with a world selector and a **month selector** (the
+The dashboard is organised as a left **sidebar** with pages: **Controls** (the game catalog,
+capacity, and start/register/restart actions), **Billing**, and — for administrators only —
+**Exclusions** (the per-game non-player list described above; the nav item is hidden for non-admins
+and the `/api/exclusions` routes reject non-admins server-side regardless).
+
+The **Billing** page shows a **Your bill** panel with a world selector and a **month selector** (the
 current month "to date" plus any past months present in the ledger). Data flows
 `presence ledger -> billing.py -> controller "billing" read action -> interface /api/billing ->
 UI`, keyed to the viewer's Tailscale login:

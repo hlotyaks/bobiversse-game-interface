@@ -16,10 +16,14 @@ Group=root
 # ledger. No game data or secrets. `--min-kbps` is only the fallback for games without an occupancy
 # reader. For a future non-Tailscale/public-IP deployment, switch to `--source conntrack` (which
 # needs the CAP_NET_ADMIN below and the conntrack tool).
-# --exclude-login: tailnet logins that are never Enshrouded players (server admins / dashboard-only
-# users). Their dashboard/SSH traffic is indistinguishable by volume from game traffic, so without
-# this they can be mis-ranked into a game slot. Repeat the flag per login.
-ExecStart=/usr/local/libexec/game-server-interface/presence_meter.py --interval 60 --source tailscale --min-kbps 25 --exclude-login hlotyaks@github
+# Non-player exclusions: a tailnet login whose dashboard/SSH traffic is indistinguishable by volume
+# from game traffic can be mis-ranked into a game slot. Two mechanisms:
+#   --exclude-login LOGIN     -- global: never a player of ANY game (e.g. a monitoring bot).
+#   --exclusions-file (default /var/lib/game-server-interface/presence-exclusions.json)
+#                             -- per-game: admin-managed via the interface, re-read every cycle
+#                                (no restart). Use this for someone who is a non-player of one game
+#                                but plays others (e.g. an admin who doesn't play Enshrouded).
+ExecStart=/usr/local/libexec/game-server-interface/presence_meter.py --interval 60 --source tailscale --min-kbps 25
 Restart=on-failure
 RestartSec=15s
 Nice=10

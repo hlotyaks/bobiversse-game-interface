@@ -239,6 +239,27 @@ def instance_client_count(template_id: str, container: str, docker_bin: str) -> 
     return reader(logs) if logs else None
 
 
+def load_exclusions(exclusions_path: Path) -> dict[str, frozenset[str]]:
+    """Load the admin-managed per-game exclusion map: {template_id: frozenset(logins)}.
+
+    A missing, unreadable, or malformed file yields no exclusions (fail open to *including* players --
+    we would rather bill a mis-ranked admin than silently drop a real player). Read fresh every cycle
+    so an admin's edit via the interface takes effect on the next sample, with no meter restart.
+    """
+    try:
+        raw = json.loads(exclusions_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    mapping = raw.get("exclusions") if isinstance(raw, dict) else None
+    if not isinstance(mapping, dict):
+        return {}
+    result: dict[str, frozenset[str]] = {}
+    for template_id, logins in mapping.items():
+        if isinstance(template_id, str) and isinstance(logins, list):
+            result[template_id] = frozenset(login for login in logins if isinstance(login, str))
+    return result
+
+
 def instance_templates(catalog: dict[str, Any]) -> dict[str, str]:
     """Return {"<template>-<instance>": template_id} for every allowlisted slot."""
     mapping: dict[str, str] = {}
@@ -254,15 +275,14 @@ def instance_templates(catalog: dict[str, Any]) -> dict[str, str]:
     return mapping
 
 
-def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS, alpha: float = DEFAULT_RATE_SMOOTHING, exclude_logins: frozenset[str] = frozenset()) -> None:
+def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS, alpha: float = DEFAULT_RATE_SMOOTHING, exclude_logins: frozenset[str] = frozenset(), template_exclusions: dict[str, frozenset[str]] | None = None) -> None:
     status_raw = _run([tailscale_bin, "status", "--json"])
     try:
         peers = parse_status_peers(json.loads(status_raw)) if status_raw else {}
     except json.JSONDecodeError:
         peers = {}
-    # Drop known non-players (server admins / dashboard-only users) before attribution: their tailnet
-    # traffic is dashboard/SSH, not game, and is indistinguishable by volume from a real player's, so
-    # ranking could hand them a game slot. Excluding them here means the slot goes to an actual player.
+    # Global exclusions (--exclude-login): logins that are never a player of *any* game (e.g. a
+    # monitoring bot). Drop them entirely before attribution so they can't be ranked into any slot.
     if exclude_logins:
         peers = {login: info for login, info in peers.items() if login not in exclude_logins}
     now_mono = time.monotonic()
@@ -271,17 +291,25 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
     ewma = update_rate_ewma(state.get("rate_ewma", {}), peers, previous_bytes, dt, alpha)
     ranked = rank_by_smoothed_rate(ewma)
     templates = instance_templates(catalog)
+    template_exclusions = template_exclusions or {}
     for key in instance_ports(catalog):
         if not is_unit_active(key, systemctl_bin):
             present: list[str] = []
         else:
-            count = instance_client_count(templates.get(key, ""), f"game-{key}", docker_bin)
+            template_id = templates.get(key, "")
+            # Per-game exclusions: a login that is a non-player of *this* game (a server admin who
+            # never plays Enshrouded but does play others). Applied per instance, not globally, so
+            # the same login can still be attributed to a different game. Excluding before selection
+            # means the slot passes to the next real player rather than being spent on a non-player.
+            excluded = template_exclusions.get(template_id, frozenset())
+            count = instance_client_count(template_id, f"game-{key}", docker_bin)
             if count is not None:
                 # Game-authoritative occupancy: attribute the reported N clients to the busiest peers.
-                present = attribute_by_count(ranked, count, floor_kbps)
+                ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
+                present = attribute_by_count(ranked_for_instance, count, floor_kbps)
             else:
                 # No game-occupancy reader for this template -- fall back to the rate threshold.
-                present = playing_logins(peers, previous_bytes, dt, min_kbps)
+                present = [login for login in playing_logins(peers, previous_bytes, dt, min_kbps) if login not in excluded]
         append_ledger(ledger_path, {"ts": now(), "instance": key, "present": present})
     state["bytes"] = {login: int(info["bytes"]) for login, info in peers.items()}
     state["rate_ewma"] = ewma
@@ -367,8 +395,12 @@ def main() -> int:
                         help="tailscale source: minimum per-peer traffic rate to count as playing")
     parser.add_argument("--interval", type=int, default=60, help="seconds between samples (0 = one cycle then exit)")
     parser.add_argument("--exclude-login", action="append", default=[], metavar="LOGIN",
-                        help="tailscale login that is never a player (server admin / dashboard-only user); "
-                             "excluded from attribution. Repeatable.")
+                        help="tailscale login that is never a player of ANY game (e.g. a monitoring bot); "
+                             "excluded from attribution globally. Repeatable. For a per-game non-player "
+                             "(admin of one game), use the admin-managed --exclusions-file instead.")
+    parser.add_argument("--exclusions-file", type=Path, default=Path("/var/lib/game-server-interface/presence-exclusions.json"),
+                        help="per-game exclusion map ({template_id: [logins]}), admin-edited via the "
+                             "interface and re-read every cycle; missing file means no per-game exclusions.")
     parser.add_argument("--tailscale-bin", default="/usr/bin/tailscale")
     parser.add_argument("--systemctl-bin", default="/usr/bin/systemctl")
     parser.add_argument("--docker-bin", default="/usr/bin/docker")
@@ -391,7 +423,9 @@ def main() -> int:
         if args.source == "conntrack":
             run_cycle_conntrack(catalog, args.ledger, args.tailscale_bin, args.conntrack_bin)
         else:
-            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, args.docker_bin, state, args.min_kbps, exclude_logins=exclude_logins)
+            # Read fresh each cycle so admin edits via the interface apply without a restart.
+            template_exclusions = load_exclusions(args.exclusions_file)
+            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, args.docker_bin, state, args.min_kbps, exclude_logins=exclude_logins, template_exclusions=template_exclusions)
 
     if args.interval <= 0:
         cycle()

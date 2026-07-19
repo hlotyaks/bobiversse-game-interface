@@ -33,9 +33,13 @@ CRASH_LOOP_RESTART_THRESHOLD = 5
 CRASH_LOOP_AUTO_RESTART_THRESHOLD = max(1, CRASH_LOOP_RESTART_THRESHOLD - 2)
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+# A tailnet login as reported by `tailscale status` (LoginName), e.g. "hlotyaks@github". Bounded
+# and single-line so it is safe to store and to hand to the presence meter as an attribution filter.
+LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$")
+MAX_EXCLUSIONS_PER_TEMPLATE = 64
 SECRET_PATTERN = re.compile(r"(?i)(password|pass|secret|token|api[_-]?key|key)\s*([=:])\s*[^\s,;]+")
-WRITE_ACTIONS = {"register_instance", "start", "restart"}
-READ_ACTIONS = {"list_catalog", "list_instances", "status", "health", "logs", "operation_status", "capacity", "backup_status", "billing"}
+WRITE_ACTIONS = {"register_instance", "start", "restart", "set_exclusions"}
+READ_ACTIONS = {"list_catalog", "list_instances", "status", "health", "logs", "operation_status", "capacity", "backup_status", "billing", "list_exclusions"}
 
 
 class ControllerError(Exception):
@@ -111,6 +115,10 @@ class Controller:
         self.audit_path = audit_path
         self.operations_path = state_path.with_name("operations.json")
         self.backup_status_path = state_path.with_name("backup_status.json")
+        # Per-game (per-template) presence-exclusion list, admin-editable via the interface and read
+        # fresh by the presence meter each cycle. Kept here (controller-managed state) rather than in
+        # the curated catalog so it can change at runtime without a catalog edit or a service restart.
+        self.exclusions_path = state_path.with_name("presence-exclusions.json")
         # Usage-metering read paths. The billing calculator (tools/billing.py) is installed next
         # to this controller in the deployed layout, so default to a sibling module.
         self.presence_ledger = presence_ledger or Path("/var/lib/game-server-interface/presence.jsonl")
@@ -155,6 +163,54 @@ class Controller:
             raise ControllerError("billing config is invalid")
         instance_key = f"{template_id}-{instance_id}"
         return billing.build_report(self.presence_ledger, config, instance_key, month)
+
+    def _read_exclusions(self) -> dict[str, list[str]]:
+        """Load the raw per-template exclusion map ({template_id: [logins]}); {} if absent/invalid."""
+        try:
+            payload = json.loads(self.exclusions_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+        mapping = payload.get("exclusions") if isinstance(payload, dict) else None
+        if not isinstance(mapping, dict):
+            return {}
+        result: dict[str, list[str]] = {}
+        for template_id, logins in mapping.items():
+            if isinstance(template_id, str) and isinstance(logins, list):
+                result[template_id] = sorted({item for item in logins if isinstance(item, str)})
+        return result
+
+    def list_exclusions(self) -> dict[str, Any]:
+        """Return the per-game presence exclusions the meter applies (admin-facing config read)."""
+        return {"schema_version": 1, "exclusions": self._read_exclusions()}
+
+    def set_exclusions(self, template_id: Any, logins: Any) -> dict[str, Any]:
+        """Replace the exclusion list for one game (template). Validated, atomic, and audited.
+
+        ``logins`` is the full desired set for that template (set semantics, not append). An empty
+        list clears the template's entry. The template must exist in the catalog so an admin cannot
+        accumulate exclusions against a game that was never defined.
+        """
+        if not isinstance(template_id, str) or not ID_PATTERN.fullmatch(template_id):
+            raise ControllerError("invalid template ID")
+        if template_id not in self.catalog().get("templates", {}):
+            raise ControllerError("unknown template")
+        if not isinstance(logins, list) or len(logins) > MAX_EXCLUSIONS_PER_TEMPLATE:
+            raise ControllerError("invalid exclusion list")
+        cleaned: set[str] = set()
+        for login in logins:
+            if not isinstance(login, str) or len(login) > 256 or not LOGIN_PATTERN.fullmatch(login):
+                raise ControllerError("invalid exclusion login")
+            cleaned.add(login)
+        with self.lock:
+            exclusions = self._read_exclusions()
+            if cleaned:
+                exclusions[template_id] = sorted(cleaned)
+            else:
+                exclusions.pop(template_id, None)
+            self._atomic_json_write(self.exclusions_path, {"schema_version": 1, "exclusions": exclusions})
+        return {"schema_version": 1, "exclusions": exclusions}
 
     @staticmethod
     def now() -> str:
@@ -600,6 +656,10 @@ class Controller:
                 payload = self.backup_status()
             elif action == "billing":
                 payload = self.billing_report(template_id, instance_id, request.get("month"))
+            elif action == "list_exclusions":
+                payload = self.list_exclusions()
+            elif action == "set_exclusions":
+                payload = self.set_exclusions(template_id, request.get("logins"))
             elif action == "logs":
                 payload = self.read_logs(self._registered(template_id, instance_id), request.get("tail", 50))
             else:

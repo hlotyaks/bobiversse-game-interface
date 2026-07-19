@@ -8,10 +8,12 @@ const gameRequestError = document.querySelector('#game-request-error');
 const addGameButton = document.querySelector('#add-game');
 const template = document.querySelector('#game-template');
 const refreshStatusElement = document.querySelector('#refresh-status');
-const billingSection = document.querySelector('#billing');
 const billingBody = document.querySelector('#billing-body');
 const billingInstanceSelect = document.querySelector('#billing-instance');
 const billingMonthSelect = document.querySelector('#billing-month');
+const exclusionsBody = document.querySelector('#exclusions-body');
+const navItems = [...document.querySelectorAll('.nav-item')];
+const pages = [...document.querySelectorAll('.page')];
 const IDLE_REFRESH_INTERVAL_MS = 10000;
 const OPERATION_REFRESH_INTERVAL_MS = 2000;
 const OPERATION_MAX_ATTEMPTS = 60;
@@ -23,8 +25,19 @@ let refreshTimer = null;
 let refreshInFlight = false;
 let billing = null;
 const billingSelection = { key: null, month: null };
+let activePage = 'controls';
+let exclusions = null;
+let exclusionsLoaded = false;
 const trackedOperations = new Map();
 const consoleEntries = new Map();
+
+function showPage(name) {
+  if (!navItems.some((item) => item.dataset.page === name && !item.hidden)) name = 'controls';
+  activePage = name;
+  navItems.forEach((item) => item.classList.toggle('active', item.dataset.page === name));
+  pages.forEach((page) => { page.hidden = page.dataset.page !== name; });
+  if (name === 'exclusions' && !exclusionsLoaded) loadExclusions();
+}
 
 function showNotice(message, error = false) {
   noticeElement.textContent = message;
@@ -225,8 +238,14 @@ function registeredBillingInstances() {
 
 function setupBilling() {
   const options = registeredBillingInstances();
-  billingSection.hidden = options.length === 0;
-  if (!options.length) { billing = null; return; }
+  if (!options.length) {
+    billing = null;
+    billingSelection.key = null;
+    billingInstanceSelect.replaceChildren();
+    billingMonthSelect.replaceChildren();
+    billingBody.innerHTML = '<p class="empty">No registered worlds yet. Register and start a world on the Controls page to begin metering usage.</p>';
+    return;
+  }
   const keys = options.map((option) => option.key);
   if (!billingSelection.key || !keys.includes(billingSelection.key)) {
     billingSelection.key = options[0].key;
@@ -274,13 +293,98 @@ function renderBilling() {
   billingBody.innerHTML = `${yourShare}${admin}<p class="bill-note">Dry run — no money is charged. The kitty is the surplus from solo premiums that funds group discounts and fixed costs.</p>`;
 }
 
-function button(label, style, handler, disabled) {
+const LOGIN_PATTERN = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
+
+async function loadExclusions() {
+  try {
+    const result = await request('/api/exclusions');
+    exclusions = (result && result.exclusions) || {};
+    exclusionsLoaded = true;
+  } catch (error) {
+    exclusions = { error: error.message };
+  }
+  renderExclusions();
+}
+
+function renderExclusions() {
+  if (!exclusionsBody) return;
+  if (exclusions && exclusions.error) {
+    exclusionsBody.innerHTML = `<p class="empty">${escapeHtml(exclusions.error)}</p>`;
+    return;
+  }
+  if (!catalog.length) {
+    exclusionsBody.innerHTML = '<p class="empty">The game catalog is unavailable.</p>';
+    return;
+  }
+  const map = exclusions || {};
+  exclusionsBody.replaceChildren(...catalog.map((game) => exclusionCard(game, map[game.template_id] || [])));
+}
+
+function exclusionCard(game, logins) {
+  const card = document.createElement('div');
+  card.className = 'exclusion-card';
+  const head = document.createElement('div');
+  head.className = 'exclusion-head';
+  head.innerHTML = `<div><p class="eyebrow game-id">${escapeHtml(game.template_id)}</p><h3>${escapeHtml(game.display_name || game.template_id)}</h3></div><span class="exclusion-count">${logins.length} excluded</span>`;
+  card.append(head);
+
+  const chips = document.createElement('div');
+  if (logins.length) {
+    chips.className = 'chips';
+    logins.forEach((login) => {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      const code = document.createElement('code');
+      code.textContent = login;
+      chip.append(code, button('✕', 'chip-remove', () => setExclusions(game.template_id, logins.filter((item) => item !== login), `Removed ${login} from ${game.template_id} exclusions.`)));
+      chip.querySelector('button').setAttribute('aria-label', `Remove ${login}`);
+      chips.append(chip);
+    });
+  } else {
+    chips.className = 'chips-empty';
+    chips.textContent = 'No one is excluded from this game. Everyone who plays is metered.';
+  }
+  card.append(chips);
+
+  const form = document.createElement('form');
+  form.className = 'exclusion-add';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'login@domain (e.g. someone@github)';
+  input.setAttribute('aria-label', `Add an excluded login for ${game.template_id}`);
+  input.pattern = '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+';
+  input.maxLength = 256;
+  form.append(input, button('Add exclusion', 'secondary', null, false, 'submit'));
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const login = input.value.trim();
+    if (!LOGIN_PATTERN.test(login)) { showNotice('Enter a valid tailnet login, e.g. someone@github.', true); return; }
+    if (logins.includes(login)) { showNotice(`${login} is already excluded from ${game.template_id}.`); return; }
+    setExclusions(game.template_id, [...logins, login], `Excluded ${login} from ${game.template_id}.`);
+  });
+  card.append(form);
+  return card;
+}
+
+async function setExclusions(templateId, logins, message) {
+  try {
+    const result = await request('/api/exclusions', { method: 'POST', body: JSON.stringify({ template_id: templateId, logins }) });
+    exclusions = (result && result.exclusions) || {};
+    exclusionsLoaded = true;
+    renderExclusions();
+    showNotice(message);
+  } catch (error) {
+    showNotice(error.message, true);
+  }
+}
+
+function button(label, style, handler, disabled, type = 'button') {
   const element = document.createElement('button');
   element.className = `button ${style}`;
-  element.type = 'button';
+  element.type = type;
   element.textContent = label;
   element.disabled = disabled;
-  element.addEventListener('click', handler);
+  if (handler) element.addEventListener('click', handler);
   return element;
 }
 
@@ -450,9 +554,14 @@ async function watchOperations() {
 
 async function load() {
   [catalog, instances, capacity, gameRequestPolicy] = await Promise.all([request('/api/catalog'), request('/api/instances'), request('/api/capacity'), request('/api/game-requests/policy')]);
-  addGameButton.hidden = gameRequestPolicy.allowed !== true;
+  const isAdmin = gameRequestPolicy.allowed === true;
+  addGameButton.hidden = !isAdmin;
+  const exclusionsNav = navItems.find((item) => item.dataset.page === 'exclusions');
+  if (exclusionsNav) exclusionsNav.hidden = !isAdmin;
+  if (!isAdmin && activePage === 'exclusions') showPage('controls');
   render();
   setupBilling();
+  if (activePage === 'exclusions' && exclusionsLoaded) renderExclusions();
 }
 
 async function refresh() {
@@ -473,6 +582,8 @@ async function refresh() {
   }
 }
 
+navItems.forEach((item) => item.addEventListener('click', () => showPage(item.dataset.page)));
+showPage('controls');
 document.querySelector('#refresh').addEventListener('click', refresh);
 billingInstanceSelect.addEventListener('change', (event) => {
   billingSelection.key = event.target.value;
