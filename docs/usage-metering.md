@@ -19,19 +19,31 @@ count — so identity comes from the network layer. The meter has two interchang
 - **`tailscale` (default).** Players reach the game over the tailnet, so their packets travel
   inside the WireGuard tunnel and the kernel's conntrack never sees a `client → game-port` flow
   (this was verified on bobiverse; full evidence in
-  [presence-source-conntrack-findings.md](presence-source-conntrack-findings.md)). Instead the
-  meter reads `tailscale status --json` and counts a peer as **playing** when it is `Active` **and**
-  its traffic rate since the last sample exceeds `--min-kbps` (default 25) — the rate is what
-  separates a player from someone merely viewing the dashboard. Presence is attributed to instances
-  whose systemd unit is active. Identity is the Tailscale login, the same one the dashboard uses, so
-  there is **no separate login system**.
+  [presence-source-conntrack-findings.md](presence-source-conntrack-findings.md)). The meter splits
+  the question into **how many** and **who**:
+  - **How many** connected clients there are comes from the *game itself*. Enshrouded logs a
+    per-machine block every ~30s (`m#N(...) … OperatingNormally`, the server's own entry excluded);
+    the meter reads it via `docker logs`. This is authoritative and needs no tuning.
+  - **Who** they are comes from `tailscale status --json`: the reported client count is attributed
+    to the busiest tailnet peers by traffic rate. Identity is the Tailscale login, the same one the
+    dashboard uses, so there is **no separate login system**.
+
+  This replaced an earlier "peer is `Active` and above `--min-kbps`" heuristic that silently
+  undercounted: real per-client Enshrouded traffic (~single-digit kbps) sits far below any usable
+  bandwidth threshold, so genuine players were dropped while a host with ambient non-game tailnet
+  traffic leaked through. The game's own count is the reliable player/idle discriminator. Games
+  **without** an occupancy reader still fall back to the `--min-kbps` traffic-rate heuristic.
+  Presence is attributed only to instances whose systemd unit is active.
 - **`conntrack`.** Watches `conntrack -L` for direct `client → game-port` flows. This is blind under
   Tailscale (above) but is the right source for a future cloud/public-IP deployment without the
   WireGuard tunnel. Preserved and tested; switch with `--source conntrack`.
 
-Known limits of the default source (fine for a dry-run Stage 1): a one-cycle startup lag (a rate
-needs two samples), the `--min-kbps` threshold may need tuning per game, and if two games run at
-once a player's traffic counts toward each running instance (it can't be split between them).
+Known limits of the default source (fine for a dry-run Stage 1): a one-cycle startup lag (the
+identity rate needs two samples); attribution assumes the game's connected clients are the busiest
+tailnet peers, so a non-player peer generating heavy tailnet traffic could be mis-ranked into a
+player's place; and if two games run at once a player's traffic counts toward each running instance
+(it can't be split between them). Adding an occupancy reader for another game is a small function
+keyed by template in [tools/presence_meter.py](../tools/presence_meter.py) (`OCCUPANCY_READERS`).
 
 ## Components
 

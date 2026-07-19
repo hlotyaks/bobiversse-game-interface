@@ -92,6 +92,67 @@ class ConntrackSourceTests(unittest.TestCase):
         self.assertEqual(present, ["gamer@ex", "viewer@ex"])
 
 
+# --- game-authoritative occupancy (Enshrouded 'Machines:' block) -----------------------
+
+def _machines_block(ts: str, *clients: str) -> str:
+    lines = [f"[I {ts}] -------------- Session ----------------",
+             f"[I {ts}] Machines:",
+             f"[I {ts}]   m#0(128): up 0 (0), down 0 (0), remote 0 (0), limit 256, lost 0, ping 0 ms, EstablishingBaseline"]
+    lines += [f"[I {ts}]   {c}" for c in clients]
+    lines.append(f"[I {ts}] ---------------------------------------")
+    return "\n".join(lines)
+
+
+THREE_PLAYERS = _machines_block(
+    "24:57:50,595",
+    "m#1(1281): up 149 (171), down 23 (25), remote 149 (167), limit 600, lost 262, ping 53 ms, OperatingNormally",
+    "m#2(898): up 138 (150), down 29 (30), remote 139 (149), limit 1,393, lost 49, ping 44 ms, OperatingNormally",
+    "m#3(1155): up 136 (151), down 28 (31), remote 135 (149), limit 558, lost 182, ping 47 ms, OperatingNormally",
+)
+NO_PLAYERS = _machines_block("25:46:21,326")  # only the server's own EstablishingBaseline entry
+
+
+class EnshroudedOccupancyTests(unittest.TestCase):
+    def test_counts_only_operating_clients(self) -> None:
+        self.assertEqual(METER.enshrouded_client_count(THREE_PLAYERS), 3)
+
+    def test_empty_block_reports_zero_not_none(self) -> None:
+        self.assertEqual(METER.enshrouded_client_count(NO_PLAYERS), 0)
+
+    def test_uses_the_last_complete_block(self) -> None:
+        # A player leaves between blocks: the latest complete block wins (3 -> 1).
+        one = _machines_block("25:00:20,642", "m#2(898): up 68 (70), down 24 (26), ping 44 ms, OperatingNormally")
+        self.assertEqual(METER.enshrouded_client_count(THREE_PLAYERS + "\n" + one), 1)
+
+    def test_incomplete_trailing_block_is_ignored(self) -> None:
+        partial = "\n".join(["[I 25:00:20,642] -------------- Session ----------------",
+                             "[I 25:00:20,642] Machines:",
+                             "[I 25:00:20,642]   m#1(1): up 1 (1), down 1 (1), ping 40 ms, OperatingNormally"])
+        # No closing rule yet -> fall back to the last complete block (3), not the partial one.
+        self.assertEqual(METER.enshrouded_client_count(THREE_PLAYERS + "\n" + partial), 3)
+
+    def test_no_block_is_unknown(self) -> None:
+        self.assertIsNone(METER.enshrouded_client_count("[I 00:00:01,000] [server] Saved\n"))
+
+
+class AttributionTests(unittest.TestCase):
+    def test_rank_by_rate_orders_all_peers_no_threshold(self) -> None:
+        current = {"a@ex": {"bytes": 5_000_000}, "b@ex": {"bytes": 2_000_000}, "c@ex": {"bytes": 1_010_000}}
+        previous = {"a@ex": 1_000_000, "b@ex": 1_000_000, "c@ex": 1_000_000}  # +4MB, +1MB, +10KB
+        ranked = METER.rank_logins_by_rate(current, previous, dt=60.0)
+        self.assertEqual([login for _, login in ranked], ["a@ex", "b@ex", "c@ex"])
+
+    def test_attribute_takes_top_n_by_count(self) -> None:
+        ranked = [(300.0, "a@ex"), (120.0, "b@ex"), (60.0, "c@ex")]
+        self.assertEqual(METER.attribute_by_count(ranked, 2, floor_kbps=1.0), ["a@ex", "b@ex"])
+        self.assertEqual(METER.attribute_by_count(ranked, 0, floor_kbps=1.0), [])
+
+    def test_attribute_drops_idle_peers_below_floor(self) -> None:
+        # Game says 3 clients but only two peers have real traffic -> under-report, never invent one.
+        ranked = [(300.0, "a@ex"), (120.0, "b@ex"), (0.2, "idle@ex")]
+        self.assertEqual(METER.attribute_by_count(ranked, 3, floor_kbps=1.0), ["a@ex", "b@ex"])
+
+
 class CatalogPortTests(unittest.TestCase):
     def test_instance_ports_from_real_catalog(self) -> None:
         import yaml
@@ -100,6 +161,13 @@ class CatalogPortTests(unittest.TestCase):
         self.assertEqual(ports["enshrouded-primary"], 15636)
         self.assertEqual(ports["enshrouded-secondary"], 15640)
         self.assertEqual(ports["valheim-primary"], 2456)
+
+    def test_instance_templates_from_real_catalog(self) -> None:
+        import yaml
+        catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+        templates = METER.instance_templates(catalog)
+        self.assertEqual(templates["enshrouded-primary"], "enshrouded")
+        self.assertEqual(templates["valheim-primary"], "valheim")
 
 
 if __name__ == "__main__":

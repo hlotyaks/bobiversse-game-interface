@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Read-only diagnostics for game-server-interface usage metering.
+#
+# Installed root-owned and exposed to the interface owner through a scoped NOPASSWD sudoers rule
+# (deploy/etc/sudoers.d/gsi-diagnose) so automated/remote diagnosis can inspect root-owned state
+# without an interactive password. It is deliberately READ-ONLY: it only reads the presence ledger,
+# runs the pure billing calculator, and tails the meter journal. It never writes, edits, starts,
+# stops, or reconfigures anything. Keep it that way -- the sudoers grant is only safe because of it.
+set -euo pipefail
+
+LEDGER=/var/lib/game-server-interface/presence.jsonl
+BILLING=/usr/local/libexec/game-server-interface/billing.py
+UNIT=game-presence-meter.service
+INSTANCE_RE='^[a-z0-9-]+$'
+
+usage() {
+  echo "usage: gsi-diagnose {ledger|bill|meter-log|all} [instance-id]" >&2
+  echo "  read-only. instance-id defaults to enshrouded-primary." >&2
+  exit 2
+}
+
+sub="${1:-all}"
+inst="${2:-enshrouded-primary}"
+[[ "$inst" =~ $INSTANCE_RE ]] || { echo "invalid instance id" >&2; exit 2; }
+
+ledger_stats() {
+  python3 - "$LEDGER" <<'PY'
+import json, sys, collections, datetime
+path = sys.argv[1]
+def parse_ts(s): return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+by = collections.defaultdict(lambda: {"n":0,"nonempty":0,"maxn":0,
+      "users":collections.Counter(),"conc":collections.Counter(),"first":None,"last":None})
+try:
+    fh = open(path)
+except FileNotFoundError:
+    print("no presence ledger yet:", path); sys.exit(0)
+for line in fh:
+    line = line.strip()
+    if not line: continue
+    r = json.loads(line); d = by[r.get("instance","?")]; d["n"] += 1
+    p = r.get("present", []) or []; d["conc"][len(p)] += 1; d["maxn"] = max(d["maxn"], len(p))
+    if p: d["nonempty"] += 1
+    for u in p: d["users"][u] += 1
+    ts = r.get("ts")
+    if ts:
+        d["first"] = d["first"] or ts; d["last"] = ts
+for inst, d in sorted(by.items()):
+    span = ""
+    if d["first"] and d["last"]:
+        h = (parse_ts(d["last"]) - parse_ts(d["first"])).total_seconds()/3600
+        span = f"  ({h:.1f}h wall: {d['first']} .. {d['last']})"
+    print(f"\n=== {inst} ===")
+    print(f"samples={d['n']} nonempty={d['nonempty']} max_concurrent={d['maxn']}{span}")
+    for k in sorted(d["conc"]): print(f"   {k} present: {d['conc'][k]:5d} samples")
+    for u, c in d["users"].most_common(): print(f"   ~{c/60:5.2f}h ({c:4d} samples)  {u}")
+PY
+}
+
+case "$sub" in
+  ledger)    ledger_stats ;;
+  bill)      "$BILLING" --instance "$inst" ;;
+  meter-log) journalctl -u "$UNIT" --no-pager -n 120 ;;
+  all)
+    echo "########## presence ledger ##########"; ledger_stats
+    echo; echo "########## billing ($inst) ##########"; "$BILLING" --instance "$inst" || true
+    echo; echo "########## meter journal (tail) ##########"; journalctl -u "$UNIT" --no-pager -n 40 ;;
+  *) usage ;;
+esac

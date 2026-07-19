@@ -8,9 +8,13 @@ record ``{"ts", "instance", "present": [logins]}`` and differ only in how they o
 - ``tailscale`` (default, current bobiverse deployment): players reach the game over the tailnet,
   so their packets arrive *inside* the WireGuard tunnel and the kernel's conntrack never sees a
   ``client -> game-port`` flow (verified 2026-07-18 -- see docs/presence-source-conntrack-findings.md).
-  Instead we read ``tailscale status --json``: a peer that is ``Active`` and exchanging traffic
-  above a rate threshold with the host is playing, and its login is the identity. Attribution is
-  gated to instances whose systemd unit is active.
+  How many clients are connected comes from the game itself when we can read it (Enshrouded logs a
+  per-machine ``OperatingNormally`` block every ~30s); *who* they are comes from ``tailscale status
+  --json``, attributing the reported client count to the busiest tailnet peers. Real per-client game
+  traffic is far below any usable bandwidth threshold, so the game's own count -- not a kbps cutoff
+  -- is what distinguishes a player from someone merely idling on the tailnet. Games without an
+  occupancy reader fall back to the ``--min-kbps`` traffic-rate heuristic. Attribution is gated to
+  instances whose systemd unit is active.
 
 - ``conntrack`` (for a future cloud / public-IP deployment *without* Tailscale): when clients
   connect directly to the published UDP port, ``conntrack -L`` shows their source addresses and we
@@ -43,6 +47,11 @@ import yaml
 TAILNET_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 CONNTRACK_SRC = re.compile(r"src=(\d{1,3}(?:\.\d{1,3}){3})")
 DEFAULT_MIN_KBPS = 25.0
+# When the game itself reports how many clients are connected, we assign identities to the
+# top-N tailnet peers by traffic rate. This floor only drops peers with essentially no traffic,
+# so a stale count can never invent a phantom player; it is not the player/idle discriminator
+# the old min-kbps threshold tried (and failed) to be -- the game's count is that discriminator.
+DEFAULT_ATTRIBUTION_FLOOR_KBPS = 1.0
 
 
 # --------------------------------------------------------------------------- shared
@@ -139,7 +148,103 @@ def playing_logins(current: dict[str, dict[str, Any]], previous_bytes: dict[str,
     return [login for _, login in ranked]
 
 
-def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, state: dict[str, Any], min_kbps: float) -> None:
+def rank_logins_by_rate(current: dict[str, dict[str, Any]], previous_bytes: dict[str, int], dt: float) -> list[tuple[float, str]]:
+    """Rank logins by traffic rate (kbps) since the last sample, highest first.
+
+    Unlike ``playing_logins`` this applies no threshold and no ``Active`` gate -- it is the identity
+    ranking used together with a game-reported client count. A login with no prior sample (first
+    cycle, or a reconnect that reset counters) is skipped rather than guessed.
+    """
+    if dt <= 0:
+        return []
+    ranked: list[tuple[float, str]] = []
+    for login, info in current.items():
+        prior = previous_bytes.get(login)
+        if prior is None:
+            continue
+        delta = int(info["bytes"]) - int(prior)
+        if delta < 0:
+            continue
+        ranked.append(((delta * 8) / 1000.0 / dt, login))
+    ranked.sort(reverse=True)
+    return ranked
+
+
+def attribute_by_count(ranked: list[tuple[float, str]], count: int, floor_kbps: float) -> list[str]:
+    """Assign identities to ``count`` connected clients: the top-``count`` peers by traffic rate.
+
+    Peers at or below ``floor_kbps`` are dropped so a stale/lagging count never attributes play to
+    an idle peer -- we would rather under-report by one than bill the wrong person. Returned sorted.
+    """
+    if count <= 0:
+        return []
+    return sorted(login for rate, login in ranked[:count] if rate > floor_kbps)
+
+
+def enshrouded_client_count(log_text: str) -> int | None:
+    """Connected-client count from the most recent *complete* Enshrouded ``Machines:`` block.
+
+    Enshrouded prints a ``Session``/``Machines:`` block every ~30s. Each connected client is a
+    ``m#N(...) ... OperatingNormally`` line; the server's own entry reports ``EstablishingBaseline``
+    (ping 0) and is not counted. Returns ``None`` if no complete block is present yet (unknown), or
+    an int (0 = the game reports nobody connected). This is the game's own authoritative occupancy,
+    which is why it replaces the fragile bandwidth threshold: real per-client game traffic is far
+    below any sane kbps cutoff (see docs/presence-source-conntrack-findings.md).
+    """
+    result: int | None = None
+    current: int | None = None
+    for line in log_text.splitlines():
+        if "Machines:" in line:
+            current = 0
+        elif current is not None and "m#" in line and "OperatingNormally" in line:
+            current += 1
+        elif current is not None and "-" * 20 in line:  # block closer (a long dash rule)
+            result = current
+            current = None
+    return result
+
+
+# template_id -> function(container log text) -> connected client count (or None if unknown).
+OCCUPANCY_READERS = {"enshrouded": enshrouded_client_count}
+
+
+def read_container_logs(container: str, docker_bin: str, since: str = "120s") -> str:
+    """Return recent combined stdout+stderr for a container (empty string on any failure)."""
+    try:
+        result = subprocess.run([docker_bin, "logs", "--since", since, container],
+                                capture_output=True, text=True, timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout + result.stderr
+
+
+def instance_client_count(template_id: str, container: str, docker_bin: str) -> int | None:
+    """Game-authoritative connected-client count for an instance, or None if we can't tell."""
+    reader = OCCUPANCY_READERS.get(template_id)
+    if reader is None:
+        return None
+    logs = read_container_logs(container, docker_bin)
+    return reader(logs) if logs else None
+
+
+def instance_templates(catalog: dict[str, Any]) -> dict[str, str]:
+    """Return {"<template>-<instance>": template_id} for every allowlisted slot."""
+    mapping: dict[str, str] = {}
+    templates = catalog.get("templates", {})
+    if not isinstance(templates, dict):
+        return mapping
+    for template_id, template in templates.items():
+        slots = template.get("instance_policy", {}).get("slots", {}) if isinstance(template, dict) else {}
+        if not isinstance(slots, dict):
+            continue
+        for instance_id in slots:
+            mapping[f"{template_id}-{instance_id}"] = template_id
+    return mapping
+
+
+def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS) -> None:
     status_raw = _run([tailscale_bin, "status", "--json"])
     try:
         peers = parse_status_peers(json.loads(status_raw)) if status_raw else {}
@@ -147,9 +252,20 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
         peers = {}
     now_mono = time.monotonic()
     dt = (now_mono - state["t"]) if state.get("t") is not None else 0.0
-    playing = playing_logins(peers, state.get("bytes", {}), dt, min_kbps)
+    previous_bytes = state.get("bytes", {})
+    ranked = rank_logins_by_rate(peers, previous_bytes, dt)
+    templates = instance_templates(catalog)
     for key in instance_ports(catalog):
-        present = playing if is_unit_active(key, systemctl_bin) else []
+        if not is_unit_active(key, systemctl_bin):
+            present: list[str] = []
+        else:
+            count = instance_client_count(templates.get(key, ""), f"game-{key}", docker_bin)
+            if count is not None:
+                # Game-authoritative occupancy: attribute the reported N clients to the busiest peers.
+                present = attribute_by_count(ranked, count, floor_kbps)
+            else:
+                # No game-occupancy reader for this template -- fall back to the rate threshold.
+                present = playing_logins(peers, previous_bytes, dt, min_kbps)
         append_ledger(ledger_path, {"ts": now(), "instance": key, "present": present})
     state["bytes"] = {login: int(info["bytes"]) for login, info in peers.items()}
     state["t"] = now_mono
@@ -235,6 +351,7 @@ def main() -> int:
     parser.add_argument("--interval", type=int, default=60, help="seconds between samples (0 = one cycle then exit)")
     parser.add_argument("--tailscale-bin", default="/usr/bin/tailscale")
     parser.add_argument("--systemctl-bin", default="/usr/bin/systemctl")
+    parser.add_argument("--docker-bin", default="/usr/bin/docker")
     parser.add_argument("--conntrack-bin", default="/usr/sbin/conntrack")
     args = parser.parse_args()
 
@@ -252,7 +369,7 @@ def main() -> int:
         if args.source == "conntrack":
             run_cycle_conntrack(catalog, args.ledger, args.tailscale_bin, args.conntrack_bin)
         else:
-            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, state, args.min_kbps)
+            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, args.docker_bin, state, args.min_kbps)
 
     if args.interval <= 0:
         cycle()

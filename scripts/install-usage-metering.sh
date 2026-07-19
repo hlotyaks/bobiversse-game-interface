@@ -12,9 +12,10 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# The default 'tailscale' source needs the tailscale CLI. conntrack is only needed if the meter
-# is switched to '--source conntrack' (a future non-Tailscale deployment).
+# The default 'tailscale' source needs the tailscale CLI (identity) and docker (the game's own
+# connected-client count). conntrack is only needed if switched to '--source conntrack'.
 command -v tailscale >/dev/null 2>&1 || echo "WARN: tailscale CLI not found -- the default presence source needs it" >&2
+command -v docker >/dev/null 2>&1 || echo "WARN: docker CLI not found -- the default source reads game client counts via 'docker logs'" >&2
 command -v conntrack >/dev/null 2>&1 || echo "note: conntrack not installed (only needed for --source conntrack)" >&2
 
 install -d -o root -g root -m 0700 /var/lib/game-server-interface
