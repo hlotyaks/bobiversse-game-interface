@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Pull-based GitOps for bobiverse: reconcile the running host to origin/<branch>.
+#
+# This is the STABLE, root-owned bootstrap. It is installed by scripts/install-autodeploy.sh and is
+# deliberately NOT part of the pulled checkout, so a commit landing on the deploy branch cannot
+# rewrite the code that decides whether/how to deploy. The per-change installer logic it calls
+# (scripts/deploy.sh and the phase installers) DOES come from the checkout -- that is the point of a
+# deploy -- which is why the branch must be protected (PR review) and we only ever fast-forward.
+#
+# Flow: fetch (as the unprivileged owner, who holds the git credential) -> refuse anything that is
+# not a fast-forward of the real remote -> if unchanged, exit quietly -> reset the deploy clone to
+# the new tip -> run scripts/deploy.sh -> health-check -> on any failure, roll back to the previous
+# commit, reinstall, and re-check. Driven every couple of minutes by game-autodeploy.timer.
+set -uo pipefail
+
+CONF=/etc/game-server-interface/autodeploy.conf
+# Defaults; overridable in CONF.
+CLONE=/srv/game-autodeploy/repo
+DEPLOY_USER=cbrinton
+BRANCH=main
+STATUS=/var/lib/game-server-interface/autodeploy-status.json
+LOCK=/run/game-autodeploy.lock
+# shellcheck source=/dev/null
+[[ -r ${CONF} ]] && source "${CONF}"
+
+log() { echo "autodeploy: $*"; }
+
+write_status() {
+    # $1 result, $2 from, $3 to, $4 detail
+    local tmp
+    tmp=$(mktemp)
+    printf '{"ts":"%s","result":"%s","from":"%s","to":"%s","detail":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$3" "$4" >"${tmp}"
+    install -o root -g root -m 0600 "${tmp}" "${STATUS}"
+    rm -f "${tmp}"
+}
+
+git_user() { sudo -u "${DEPLOY_USER}" -H git -C "${CLONE}" "$@"; }
+
+health_check() {
+    local ok=1
+    systemctl is-active --quiet game-server-interface-controller.service || { log "UNHEALTHY: controller not active"; ok=0; }
+    systemctl is-active --quiet game-presence-meter.service || { log "UNHEALTHY: presence meter not active"; ok=0; }
+    # The interface is a container behind a unix socket; allow a few seconds after a rebuild.
+    local sock=/run/game-server-interface/web/interface.sock i
+    for i in $(seq 1 15); do
+        [[ -S ${sock} ]] && curl --max-time 5 --unix-socket "${sock}" --fail --silent http://localhost/healthz >/dev/null && break
+        sleep 1
+        if [[ ${i} -eq 15 ]]; then log "UNHEALTHY: interface /healthz did not pass"; ok=0; fi
+    done
+    [[ ${ok} -eq 1 ]]
+}
+
+exec 9>"${LOCK}"
+if ! flock -n 9; then
+    log "another deploy is already running; skipping this tick"
+    exit 0
+fi
+
+if [[ ! -d ${CLONE}/.git ]]; then
+    log "deploy clone ${CLONE} is missing; run scripts/install-autodeploy.sh"
+    exit 1
+fi
+
+if ! git_user fetch --prune --quiet origin; then
+    log "git fetch failed (credentials or network); leaving the running version in place"
+    write_status "fetch_failed" "" "" "git fetch origin failed"
+    exit 1
+fi
+
+PREV=$(git_user rev-parse HEAD)
+NEW=$(git_user rev-parse "origin/${BRANCH}")
+
+if [[ ${PREV} == "${NEW}" ]]; then
+    exit 0  # already reconciled; stay quiet so the timer doesn't spam the journal
+fi
+
+# Fast-forward-only + verify-remote: refuse to deploy unless the new tip descends from what we have.
+# A force-push or divergent history trips this and we do nothing, loudly.
+if ! git_user merge-base --is-ancestor "${PREV}" "${NEW}"; then
+    log "REFUSING: origin/${BRANCH} (${NEW:0:12}) is not a fast-forward of the deployed commit (${PREV:0:12}); possible force-push or rewritten history"
+    write_status "refused_non_ff" "${PREV}" "${NEW}" "origin is not a fast-forward; manual review required"
+    exit 1
+fi
+
+log "deploying ${PREV:0:12} -> ${NEW:0:12} on ${BRANCH}"
+git_user reset --hard --quiet "${NEW}"
+
+if bash "${CLONE}/scripts/deploy.sh" "${PREV}" "${NEW}" && health_check; then
+    log "deploy healthy at ${NEW:0:12}"
+    write_status "deployed" "${PREV}" "${NEW}" "healthy"
+    exit 0
+fi
+
+log "deploy of ${NEW:0:12} failed health check; rolling back to ${PREV:0:12}"
+git_user reset --hard --quiet "${PREV}"
+if bash "${CLONE}/scripts/deploy.sh" "${NEW}" "${PREV}" && health_check; then
+    log "ROLLED BACK to ${PREV:0:12}; the bad commit ${NEW:0:12} is deployed on origin/${BRANCH} but NOT running"
+    write_status "rolled_back" "${NEW}" "${PREV}" "new commit failed health check; reverted to previous"
+    exit 1
+fi
+
+log "CRITICAL: rollback to ${PREV:0:12} also failed health check; manual intervention required"
+write_status "rollback_failed" "${NEW}" "${PREV}" "both new and previous commit failed health check"
+exit 2
