@@ -129,9 +129,17 @@ function render() {
       const capacityReason = capacityBlockReason(game, record, state);
       const capacityAllowed = !capacityReason;
       if (!capacityAllowed) row.querySelector('.meta').textContent += ` Resource policy: ${capacityReason}.`;
+      const running = ['active', 'activating', 'reloading'].includes(state);
       actions.append(button(registering ? 'Register slot' : crashLoop ? 'Manual retry' : 'Start', registering ? 'secondary' : '', () => registering ? register(game.template_id, instanceId) : lifecycle('start', game.template_id, instanceId), !game.enabled || starting || !capacityAllowed));
       if (record && !crashLoop) actions.append(button('Restart', 'secondary', () => lifecycle('restart', game.template_id, instanceId), !game.enabled || starting));
+      if (record) actions.append(button('Stop', 'danger', () => lifecycle('stop', game.template_id, instanceId), !running));
       row.append(actions);
+      if (record) {
+        const hint = document.createElement('p');
+        hint.className = 'action-hint';
+        hint.textContent = 'Restart also checks for and applies the latest game version.';
+        row.append(hint);
+      }
       const key = consoleKey(game.template_id, instanceId);
       const operation = trackedOperationFor(game.template_id, instanceId);
       const entry = consoleEntries.get(key);
@@ -443,11 +451,17 @@ async function register(templateId, instanceId) {
 }
 
 async function lifecycle(action, templateId, instanceId) {
-  const warning = action === 'restart' ? 'Restarting disconnects active players.' : 'Starting consumes shared host capacity.';
-  if (!await confirm(`${action === 'restart' ? 'Restart' : 'Start'} ${templateId}:${instanceId}?`, warning)) return;
+  const titles = { start: 'Start', restart: 'Restart', stop: 'Stop' };
+  const warnings = {
+    start: 'Starting consumes shared host capacity.',
+    restart: 'Restarting disconnects active players and applies the latest game version on start-up.',
+    stop: 'Stopping disconnects active players and takes the world offline until you start it again.',
+  };
+  if (!await confirm(`${titles[action]} ${templateId}:${instanceId}?`, warnings[action])) return;
   try {
     const operation = await request(`/api/actions/${action}`, { method: 'POST', body: JSON.stringify({ template_id: templateId, instance_id: instanceId }) });
-    showNotice(operation.state === 'already-running' ? 'The instance is already running.' : `Operation ${operation.operation_id} is ${operation.state}.`);
+    const already = { 'already-running': 'The instance is already running.', 'already-stopped': 'The instance is already stopped.' };
+    showNotice(already[operation.state] || `Operation ${operation.operation_id} is ${operation.state}.`);
     if (operation.operation_id) trackOperation(operation);
     await refresh();
   } catch (error) { showNotice(error.message, true); }
@@ -515,10 +529,10 @@ async function watchOperations() {
     const attempts = tracked.attempts + 1;
     try {
       const operation = await request(`/api/operations/${operationId}`);
-      if (['healthy', 'failed'].includes(operation.state)) {
+      if (['healthy', 'stopped', 'failed'].includes(operation.state)) {
         trackedOperations.delete(operationId);
         const key = consoleKey(tracked.templateId, tracked.instanceId);
-        if (operation.state === 'healthy') consoleEntries.delete(key);
+        if (operation.state === 'healthy' || operation.state === 'stopped') consoleEntries.delete(key);
         else {
           try {
             const logs = await request(`/api/logs?template_id=${encodeURIComponent(tracked.templateId)}&instance_id=${encodeURIComponent(tracked.instanceId)}&tail=25`);

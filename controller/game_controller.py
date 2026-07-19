@@ -38,7 +38,7 @@ MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$")
 MAX_EXCLUSIONS_PER_TEMPLATE = 64
 SECRET_PATTERN = re.compile(r"(?i)(password|pass|secret|token|api[_-]?key|key)\s*([=:])\s*[^\s,;]+")
-WRITE_ACTIONS = {"register_instance", "start", "restart", "set_exclusions"}
+WRITE_ACTIONS = {"register_instance", "start", "restart", "stop", "set_exclusions"}
 READ_ACTIONS = {"list_catalog", "list_instances", "status", "health", "logs", "operation_status", "capacity", "backup_status", "billing", "list_exclusions"}
 
 
@@ -546,9 +546,15 @@ class Controller:
         status = self.service_status(instance)
         if action == "start" and status["active_state"] in {"active", "activating"}:
             return {"operation_id": None, "state": "already-running", "status": status}
-        admission = self.admission(instance)
-        if not admission["allowed"]:
-            raise ControllerError("start rejected: " + "; ".join(admission["reasons"]))
+        if action == "stop" and status["active_state"] in {"inactive", "deactivating", "failed"}:
+            return {"operation_id": None, "state": "already-stopped", "status": status}
+        # Admission (capacity) is only relevant when we are about to consume resources. Stopping
+        # frees them, so it is always permitted and is never blocked by the capacity policy.
+        admission = None
+        if action in {"start", "restart"}:
+            admission = self.admission(instance)
+            if not admission["allowed"]:
+                raise ControllerError("start rejected: " + "; ".join(admission["reasons"]))
         operation_id = str(uuid.uuid4())
         operation = {
             "operation_id": operation_id,
@@ -570,21 +576,27 @@ class Controller:
         started = time.monotonic()
         with self.lock:
             operation = self.operations[operation_id]
-            operation["state"] = "starting" if operation["action"] == "start" else "restarting"
+            operation["state"] = {"start": "starting", "restart": "restarting", "stop": "stopping"}[operation["action"]]
             operation["started_at"] = self.now()
             self._save_operations()
         command = operation["action"]
+        stopping = command == "stop"
         result: subprocess.CompletedProcess[str] | None = None
         state = "failed"
         message = "systemd rejected the request"
-        crash_loop = self.service_status(instance).get("crash_loop") is True
         reset_failed = False
-        if crash_loop:
-            reset_failed = self._systemctl("reset-failed", instance["unit"]).returncode != 0
-        admission = self.admission(instance)
+        admission_ok = True
+        # Crash-loop reset and admission re-check only apply to bringing a unit up; stop is
+        # unconditional (it must be able to halt even a crash-looping or over-capacity unit).
+        if not stopping:
+            crash_loop = self.service_status(instance).get("crash_loop") is True
+            if crash_loop:
+                reset_failed = self._systemctl("reset-failed", instance["unit"]).returncode != 0
+            admission = self.admission(instance)
+            admission_ok = admission["allowed"]
         if reset_failed:
             message = "could not reset systemd crash-loop protection"
-        elif not admission["allowed"]:
+        elif not admission_ok:
             state, message = "failed", "start rejected after queue: " + "; ".join(admission["reasons"])
         else:
             result = self._systemctl(command, instance["unit"], "--no-block")
@@ -596,15 +608,21 @@ class Controller:
         if result is not None and result.returncode == 0:
             while time.monotonic() < deadline:
                 status = self.service_status(instance)
-                if status["active_state"] == "active":
-                    state, message = "healthy", "service is active"
-                    break
-                if status["active_state"] == "failed":
-                    message = "service entered failed state"
-                    break
+                active_state = status["active_state"]
+                if stopping:
+                    if active_state in {"inactive", "failed"}:
+                        state, message = "stopped", "service is stopped"
+                        break
+                else:
+                    if active_state == "active":
+                        state, message = "healthy", "service is active"
+                        break
+                    if active_state == "failed":
+                        message = "service entered failed state"
+                        break
                 time.sleep(2)
             else:
-                message = "startup timed out"
+                message = "stop timed out" if stopping else "startup timed out"
         with self.lock:
             operation["state"] = state
             operation["completed_at"] = self.now()
@@ -644,7 +662,7 @@ class Controller:
                 payload = self.register_instance(template_id, instance_id)
             elif action == "create_game_request":
                 payload = self.create_game_request(request.get("steam_app_id"), request.get("requested_slug"))
-            elif action in {"start", "restart"}:
+            elif action in {"start", "restart", "stop"}:
                 payload = self.submit_lifecycle(action, template_id, instance_id, actor)
             elif action == "status":
                 payload = self.service_status(self._registered(template_id, instance_id))

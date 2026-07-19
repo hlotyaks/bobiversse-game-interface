@@ -146,6 +146,55 @@ class ControllerContractTests(unittest.TestCase):
             self.controller.create_game_request(1203620, "Enshrouded")
 
 
+class StopLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        catalog = root / "catalog.yaml"
+        shutil.copy(Path(__file__).parents[1] / "deploy/etc/game-server-interface/catalog.yaml", catalog)
+        self.controller = MODULE.Controller(catalog, root / "state/instances.json", root / "log/audit.jsonl")
+        self.controller.register_instance("enshrouded", "primary")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _status(self, active_state: str) -> dict:
+        return {"active_state": active_state, "template_id": "enshrouded", "instance_id": "primary", "unit": "game-enshrouded-primary.service"}
+
+    def test_stop_on_stopped_instance_short_circuits(self) -> None:
+        with patch.object(self.controller, "service_status", return_value=self._status("inactive")):
+            result = self.controller.submit_lifecycle("stop", "enshrouded", "primary", "actor")
+        self.assertEqual(result["state"], "already-stopped")
+        self.assertIsNone(result["operation_id"])
+
+    def test_stop_is_allowed_even_when_capacity_would_reject(self) -> None:
+        # Stopping frees resources, so admission must NOT gate it (unlike start/restart).
+        with patch.object(self.controller, "service_status", return_value=self._status("active")), \
+             patch.object(self.controller, "admission", return_value={"allowed": False, "reasons": ["over capacity"]}), \
+             patch.object(self.controller, "_run_lifecycle"):
+            operation = self.controller.submit_lifecycle("stop", "enshrouded", "primary", "actor")
+        self.assertEqual(operation["action"], "stop")
+        self.assertEqual(operation["state"], "queued")
+        self.assertIsNone(operation["admission"])
+
+    def test_start_is_still_blocked_by_capacity(self) -> None:
+        with patch.object(self.controller, "service_status", return_value=self._status("inactive")), \
+             patch.object(self.controller, "admission", return_value={"allowed": False, "reasons": ["over capacity"]}):
+            with self.assertRaises(MODULE.ControllerError):
+                self.controller.submit_lifecycle("start", "enshrouded", "primary", "actor")
+
+    def test_dispatch_accepts_stop(self) -> None:
+        self.assertIn("stop", MODULE.WRITE_ACTIONS)
+        with patch.object(self.controller, "service_status", return_value=self._status("active")), \
+             patch.object(self.controller, "_run_lifecycle"):
+            response = self.controller.dispatch(
+                {"action": "stop", "actor": "admin@example.test", "template_id": "enshrouded", "instance_id": "primary"},
+                peer_uid=995,
+            )
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"]["action"], "stop")
+
+
 class ExclusionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

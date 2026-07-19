@@ -321,6 +321,9 @@ class InterfaceHandler(SimpleHTTPRequestHandler):
             elif path == "/api/actions/restart":
                 payload = self.controller("restart", template_id=template_id, instance_id=instance_id)
                 status = HTTPStatus.ACCEPTED
+            elif path == "/api/actions/stop":
+                payload = self.controller("stop", template_id=template_id, instance_id=instance_id)
+                status = HTTPStatus.ACCEPTED
             else:
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
