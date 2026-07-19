@@ -51,6 +51,21 @@ A future controller must reject a registration unless all of the following are t
 - The service account is created with `create-game-account` or an equivalent root-only installer and receives neither `sudo` nor Docker-group membership.
 - Secrets are written separately with root-only permissions and are not returned by the controller or copied to logs.
 
+## Two update tiers
+
+There are two distinct notions of "updating a game", and they are handled differently:
+
+- **Game build** (the game-server version the container downloads from Steam). Images like
+  `sknnr/enshrouded-dedicated-server` run SteamCMD (`app_update`) in their entrypoint on **every
+  container start**, so a **Restart** already pulls and applies the latest build — no separate
+  "force update" action is needed, and the friend-facing UI's Restart button says so. New game
+  adapters should prefer images that update-on-start (or otherwise ensure a restart refreshes the
+  build) so this stays true across the catalog.
+- **Container image** (the digest-pinned wrapper image itself). This is deliberately *not*
+  automatic: bumping it is the reviewed digest change below. With auto-deploy in place, merging that
+  catalog change to `main` rolls it out (see [auto-deploy.md](auto-deploy.md)); it is still never a
+  friend-facing button.
+
 ## Reviewed image update workflow
 
 Before changing an image pin:
