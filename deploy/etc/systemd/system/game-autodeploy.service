@@ -1,0 +1,17 @@
+[Unit]
+Description=Pull-based auto-deploy: reconcile the host to origin/main (GitOps)
+Documentation=file:///etc/game-server-interface/autodeploy.conf
+After=network-online.target game-server-interface-controller.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as root: it drives the privileged phase installers (build the interface image, restart the
+# controller/meter). It drops to the unprivileged owner only for the git fetch/reset, which is where
+# the repo credential lives. See /usr/local/sbin/game-autodeploy.
+ExecStart=/usr/local/sbin/game-autodeploy
+Nice=10
+# The deploy touches many host paths (systemd units, /opt, /etc, /var/lib, the docker socket), so it
+# is not sandboxed here -- it is the privileged reconciler. Trust comes from branch protection plus
+# the fast-forward-only, verify-remote check in the wrapper, not from a service sandbox.
+TimeoutStartSec=1200

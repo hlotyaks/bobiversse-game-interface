@@ -1,0 +1,14 @@
+[Unit]
+Description=Poll origin/main for changes to auto-deploy (GitOps)
+Documentation=file:///etc/game-server-interface/autodeploy.conf
+
+[Timer]
+# Reconcile shortly after boot, then every 2 minutes. A quiet tick (no new commit) exits in well
+# under a second, so this is cheap. Persistent so a missed window (host asleep) fires on resume.
+OnBootSec=90s
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
