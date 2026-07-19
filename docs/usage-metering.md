@@ -38,14 +38,27 @@ count — so identity comes from the network layer. The meter has two interchang
   Tailscale (above) but is the right source for a future cloud/public-IP deployment without the
   WireGuard tunnel. Preserved and tested; switch with `--source conntrack`.
 
-Known limits of the default source (fine for a dry-run Stage 1): a one-cycle startup lag (the
-identity rate needs two samples); attribution assumes the game's connected clients are the busiest
-tailnet peers, so a non-player peer generating *sustained* heavy tailnet traffic could still be
-mis-ranked into a player's place (per-peer rates are EWMA-smoothed so a single-cycle burst or a
-player's transient tailscale counter reset no longer flips a slot — this was observed crediting a
-solo player's time to a bystander before smoothing); and if two games run at once a player's traffic
-counts toward each running instance (it can't be split between them). Adding an occupancy reader for
-another game is a small function keyed by template in
+Attribution assumes the game's connected clients are the busiest tailnet peers. Two mechanisms keep
+that honest:
+
+- **Smoothing.** Per-peer rates are EWMA-smoothed, so a single-cycle burst or a player's transient
+  tailscale counter reset no longer flips a slot to the wrong person (observed crediting a solo
+  player's time to a bystander before smoothing).
+- **Exclusions.** Some tailnet peers are *never* players — a server admin or dashboard-only user
+  whose HTTPS/SSH traffic to the host is indistinguishable by volume from game traffic. List them
+  with `--exclude-login <login>` (repeatable) in the meter's unit; they are dropped before
+  attribution so the game's slots go to actual players.
+
+Correcting a bad capture after the fact (e.g. a mis-attributed login from before an exclusion was
+added): `sudo /usr/local/libexec/game-server-interface/ledger_admin.py --remove-login <login>`
+(add `--dry-run` first). It strips the login from every sample's `present` list, keeping emptied
+samples as `present: []`, atomically and at mode `0600`.
+
+Other known limits of the default source (fine for a dry-run Stage 1): a one-cycle startup lag (the
+identity rate needs two samples); a non-player peer generating *sustained* heavy game-like traffic
+that isn't on the exclusion list could still be mis-ranked; and if two games run at once a player's
+traffic counts toward each running instance (it can't be split between them). Adding an occupancy
+reader for another game is a small function keyed by template in
 [tools/presence_meter.py](../tools/presence_meter.py) (`OCCUPANCY_READERS`).
 
 ## Components

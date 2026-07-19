@@ -16,7 +16,10 @@ Group=root
 # ledger. No game data or secrets. `--min-kbps` is only the fallback for games without an occupancy
 # reader. For a future non-Tailscale/public-IP deployment, switch to `--source conntrack` (which
 # needs the CAP_NET_ADMIN below and the conntrack tool).
-ExecStart=/usr/local/libexec/game-server-interface/presence_meter.py --interval 60 --source tailscale --min-kbps 25
+# --exclude-login: tailnet logins that are never Enshrouded players (server admins / dashboard-only
+# users). Their dashboard/SSH traffic is indistinguishable by volume from game traffic, so without
+# this they can be mis-ranked into a game slot. Repeat the flag per login.
+ExecStart=/usr/local/libexec/game-server-interface/presence_meter.py --interval 60 --source tailscale --min-kbps 25 --exclude-login hlotyaks@github
 Restart=on-failure
 RestartSec=15s
 Nice=10

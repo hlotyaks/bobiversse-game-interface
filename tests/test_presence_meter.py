@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -166,6 +167,31 @@ class AttributionTests(unittest.TestCase):
         # Game says 3 clients but only two peers have real traffic -> under-report, never invent one.
         ranked = [(300.0, "a@ex"), (120.0, "b@ex"), (0.2, "idle@ex")]
         self.assertEqual(METER.attribute_by_count(ranked, 3, floor_kbps=1.0), ["a@ex", "b@ex"])
+
+
+class ExcludeLoginTests(unittest.TestCase):
+    def test_excluded_admin_never_gets_a_game_slot(self) -> None:
+        # An active dashboard-only admin (hlotyaks) out-traffics the sole real player this cycle; with
+        # exclusion the game's single slot still goes to the player, not the admin.
+        import tempfile, json, yaml
+        from pathlib import Path
+        status = {"User": {"2": {"LoginName": "player@ex"}, "9": {"LoginName": "hlotyaks@github"}},
+                  "Peer": {"p": {"UserID": 2, "Active": True, "RxBytes": 1_100_000, "TxBytes": 0},
+                           "a": {"UserID": 9, "Active": True, "RxBytes": 9_000_000, "TxBytes": 0}}}
+        catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "p.jsonl"
+            state = {"bytes": {"player@ex": 1_000_000, "hlotyaks@github": 1_000_000}, "rate_ewma": {}, "t": 0.0}
+            with unittest.mock.patch.object(METER, "_run", return_value=json.dumps(status)), \
+                 unittest.mock.patch.object(METER, "is_unit_active", return_value=True), \
+                 unittest.mock.patch.object(METER, "instance_client_count", return_value=1), \
+                 unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
+                METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
+                                          exclude_logins=frozenset({"hlotyaks@github"}))
+            rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+        primary = [r for r in rows if r["instance"] == "enshrouded-primary"]
+        self.assertTrue(primary and primary[0]["present"] == ["player@ex"])
+        self.assertNotIn("hlotyaks@github", [u for r in rows for u in r["present"]])
 
 
 class CatalogPortTests(unittest.TestCase):

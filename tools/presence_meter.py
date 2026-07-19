@@ -254,12 +254,17 @@ def instance_templates(catalog: dict[str, Any]) -> dict[str, str]:
     return mapping
 
 
-def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS, alpha: float = DEFAULT_RATE_SMOOTHING) -> None:
+def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS, alpha: float = DEFAULT_RATE_SMOOTHING, exclude_logins: frozenset[str] = frozenset()) -> None:
     status_raw = _run([tailscale_bin, "status", "--json"])
     try:
         peers = parse_status_peers(json.loads(status_raw)) if status_raw else {}
     except json.JSONDecodeError:
         peers = {}
+    # Drop known non-players (server admins / dashboard-only users) before attribution: their tailnet
+    # traffic is dashboard/SSH, not game, and is indistinguishable by volume from a real player's, so
+    # ranking could hand them a game slot. Excluding them here means the slot goes to an actual player.
+    if exclude_logins:
+        peers = {login: info for login, info in peers.items() if login not in exclude_logins}
     now_mono = time.monotonic()
     dt = (now_mono - state["t"]) if state.get("t") is not None else 0.0
     previous_bytes = state.get("bytes", {})
@@ -361,6 +366,9 @@ def main() -> int:
     parser.add_argument("--min-kbps", type=float, default=DEFAULT_MIN_KBPS,
                         help="tailscale source: minimum per-peer traffic rate to count as playing")
     parser.add_argument("--interval", type=int, default=60, help="seconds between samples (0 = one cycle then exit)")
+    parser.add_argument("--exclude-login", action="append", default=[], metavar="LOGIN",
+                        help="tailscale login that is never a player (server admin / dashboard-only user); "
+                             "excluded from attribution. Repeatable.")
     parser.add_argument("--tailscale-bin", default="/usr/bin/tailscale")
     parser.add_argument("--systemctl-bin", default="/usr/bin/systemctl")
     parser.add_argument("--docker-bin", default="/usr/bin/docker")
@@ -377,11 +385,13 @@ def main() -> int:
 
     state: dict[str, Any] = {"bytes": {}, "rate_ewma": {}, "t": None}
 
+    exclude_logins = frozenset(args.exclude_login)
+
     def cycle() -> None:
         if args.source == "conntrack":
             run_cycle_conntrack(catalog, args.ledger, args.tailscale_bin, args.conntrack_bin)
         else:
-            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, args.docker_bin, state, args.min_kbps)
+            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, args.docker_bin, state, args.min_kbps, exclude_logins=exclude_logins)
 
     if args.interval <= 0:
         cycle()

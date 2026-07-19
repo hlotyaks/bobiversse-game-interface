@@ -21,6 +21,7 @@ command -v conntrack >/dev/null 2>&1 || echo "note: conntrack not installed (onl
 install -d -o root -g root -m 0700 /var/lib/game-server-interface
 install -o root -g root -m 0755 "${repo_root}/tools/presence_meter.py" "${install_root}/presence_meter.py"
 install -o root -g root -m 0755 "${repo_root}/tools/billing.py" "${install_root}/billing.py"
+install -o root -g root -m 0755 "${repo_root}/tools/ledger_admin.py" "${install_root}/ledger_admin.py"
 
 # Root-owned billing config (nominal dry-run rates); do not overwrite an edited copy.
 install -d -o root -g root -m 0755 /etc/game-server-interface
