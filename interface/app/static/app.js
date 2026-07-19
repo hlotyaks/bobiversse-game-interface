@@ -97,17 +97,18 @@ function render() {
         : '<br>Backup: no verified automated backup yet' : '';
       const crashDetail = crashLoop ? `<br><strong>Crash loop:</strong> ${record.status.last_failure_reason || 'manual retry required'}` : '';
       row.innerHTML = `<div class="instance-row"><span class="instance-name">${instanceId}</span><span class="badge ${crashLoop || state === 'failed' ? 'failed' : state === 'active' ? 'healthy' : 'idle'}">${crashLoop ? 'CRASH LOOP' : state}</span></div><p class="meta">${record ? `${ports}<br>Unit: ${record.status.unit}${usage}${backupDetail}${crashDetail}` : 'This slot is not registered yet.'}</p>`;
-      const address = connectionAddress(game, record);
-      if (address) {
+      let anchor = row.querySelector('.meta');
+      connectionEndpoints(game, record).forEach(({ label, address }) => {
         const connection = document.createElement('div');
         connection.className = 'connection';
-        const label = document.createElement('span');
-        label.textContent = 'Connect';
+        const labelElement = document.createElement('span');
+        labelElement.textContent = label;
         const value = document.createElement('code');
         value.textContent = address;
-        connection.append(label, value, button('Copy address', 'secondary', () => copyConnection(address)));
-        row.querySelector('.meta').after(connection);
-      }
+        connection.append(labelElement, value, button('Copy address', 'secondary', () => copyConnection(address)));
+        anchor.after(connection);
+        anchor = connection;
+      });
       const actions = document.createElement('div');
       actions.className = 'actions';
       const registering = !record;
@@ -128,14 +129,19 @@ function render() {
   });
 }
 
-function connectionAddress(game, record) {
-  const hostname = game.connection?.hostname;
+function connectionEndpoints(game, record) {
+  const connection = game.connection || {};
   const ports = record?.instance?.ports || [];
   const gamePort = ports
     .filter((port) => port.protocol === 'udp' && Number.isInteger(Number(port.host)))
     .map((port) => Number(port.host))
     .sort((left, right) => left - right)[0];
-  return typeof hostname === 'string' && hostname && gamePort ? `${hostname}:${gamePort}` : '';
+  if (!gamePort) return [];
+  const endpoints = [];
+  // Offer both forms: some clients accept the MagicDNS name, others (e.g. Enshrouded) need the IP.
+  if (typeof connection.hostname === 'string' && connection.hostname) endpoints.push({ label: 'Connect (DNS)', address: `${connection.hostname}:${gamePort}` });
+  if (typeof connection.ip === 'string' && connection.ip) endpoints.push({ label: 'Connect (IP)', address: `${connection.ip}:${gamePort}` });
+  return endpoints;
 }
 
 async function copyConnection(address) {
