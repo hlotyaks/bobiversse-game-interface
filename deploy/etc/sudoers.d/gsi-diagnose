@@ -1,0 +1,10 @@
+# Scoped, passwordless access to the READ-ONLY usage-metering diagnostic wrapper.
+#
+# This lets the interface owner (and automation acting as them) inspect root-owned metering state
+# -- the presence ledger, the billing calculator's output, and the meter journal -- without an
+# interactive password. It grants exactly one command: /usr/local/sbin/gsi-diagnose, which is
+# root-owned, not writable by the invoking user, and performs read-only operations only. It does
+# NOT grant general sudo and cannot start/stop/reconfigure anything.
+#
+# Install: validate with `visudo -cf` then `install -m 0440 -o root -g root` into /etc/sudoers.d/.
+cbrinton ALL=(root) NOPASSWD: /usr/local/sbin/gsi-diagnose, /usr/local/sbin/gsi-diagnose *

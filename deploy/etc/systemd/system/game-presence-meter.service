@@ -8,12 +8,14 @@ Wants=tailscaled.service
 Type=simple
 User=root
 Group=root
-# Default source is 'tailscale': reads `tailscale status --json` for player identity + traffic
-# rate (players reach the game inside the WireGuard tunnel, which conntrack cannot see here --
-# see docs/presence-source-conntrack-findings.md), gated to active game units. Appends one
-# occupancy record per instance per cycle to the presence ledger. No game data or secrets.
-# For a future non-Tailscale/public-IP deployment, switch to `--source conntrack` (which needs
-# the CAP_NET_ADMIN below and the conntrack tool).
+# Default source is 'tailscale': connected-client COUNT comes from the game itself (Enshrouded's
+# per-machine log block, read via `docker logs`), and identity comes from `tailscale status --json`
+# by attributing that count to the busiest tailnet peers (players reach the game inside the
+# WireGuard tunnel, which conntrack cannot see here -- see docs/presence-source-conntrack-findings.md).
+# Gated to active game units. Appends one occupancy record per instance per cycle to the presence
+# ledger. No game data or secrets. `--min-kbps` is only the fallback for games without an occupancy
+# reader. For a future non-Tailscale/public-IP deployment, switch to `--source conntrack` (which
+# needs the CAP_NET_ADMIN below and the conntrack tool).
 ExecStart=/usr/local/libexec/game-server-interface/presence_meter.py --interval 60 --source tailscale --min-kbps 25
 Restart=on-failure
 RestartSec=15s
@@ -22,7 +24,9 @@ UMask=0077
 NoNewPrivileges=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/game-server-interface
+# /var/lib/... is the ledger; the docker socket is read (as root) to get the game's client count.
+# ProtectSystem=strict mounts the FS read-only, so the socket needs an explicit read-write path.
+ReadWritePaths=/var/lib/game-server-interface /run/docker.sock
 # Only the conntrack source needs CAP_NET_ADMIN; kept so switching sources is a one-line change.
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN
