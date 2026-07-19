@@ -286,6 +286,7 @@ class Controller:
             connection = template.get("connection", {})
             public_connection = {
                 "hostname": connection.get("hostname"),
+                "ip": connection.get("ip"),
                 "protocol": connection.get("protocol"),
             } if isinstance(connection, dict) else {}
             output.append({

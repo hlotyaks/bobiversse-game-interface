@@ -37,7 +37,10 @@ templates:
     enabled: true
     supported_players: 10
     connection:
-      hostname: 100.84.161.38
+      # DNS name and raw tailnet IP are both offered in the UI: some clients accept the MagicDNS
+      # name, others (e.g. Enshrouded) require the numeric IP.
+      hostname: bobiverse.tail40344b.ts.net
+      ip: 100.84.161.38
       protocol: udp
       password_guidance: Set SERVER_PASS only in the instance secret file; it must be at least five characters.
     image:
@@ -92,7 +95,10 @@ templates:
     enabled: true
     supported_players: 16
     connection:
-      hostname: 100.84.161.38
+      # DNS name and raw tailnet IP are both offered in the UI: some clients accept the MagicDNS
+      # name, others (e.g. Enshrouded) require the numeric IP.
+      hostname: bobiverse.tail40344b.ts.net
+      ip: 100.84.161.38
       protocol: udp
       password_guidance: Set the server password only in the instance secret file; never add it to this catalog.
     image:
