@@ -5,7 +5,7 @@ Run as root DURING a real multiplayer session. Each cycle it prints, side by sid
 
 - the game's own connected-client count (what the meter trusts for *how many*),
 - every tailnet peer's Rx+Tx delta and the kbps / EWMA the meter derives from it,
-- who the meter **would** attribute, via the production code path itself,
+- who the meter attributes (write-recency) and what the superseded byte-rate ranking would say,
 - the conntrack UDP flows to the game port -- the alternative identity source.
 
 It exists because the meter's *who* half failed silently: on 2026-08-23 Enshrouded logged three
@@ -64,68 +64,6 @@ def append_jsonl(path: Path, record: dict) -> None:
         handle.flush()
 
 
-def parse_peer_paths(status: dict) -> dict[str, dict]:
-    """Per-login connection path and write-recency from ``tailscale status --json``.
-
-    Collapses a login's devices the way the meter does, keeping the *most recently written* one.
-    ``RxBytes``/``TxBytes`` are populated only for peers with a direct path -- a DERP-relayed peer
-    reads 0 however hard it is playing -- which is why byte-rate ranking cannot see half the
-    players. ``LastWrite`` has no such gap: it is when the local engine last sent this peer a
-    packet, and it is *not* refreshed by mere presence (an online but idle peer sits hours stale).
-    """
-    now_dt = datetime.now(UTC)
-
-    def age(value) -> float | None:
-        if not isinstance(value, str) or value.startswith("0001"):
-            return None
-        try:
-            return (now_dt - datetime.fromisoformat(value.replace("Z", "+00:00"))).total_seconds()
-        except ValueError:
-            return None
-
-    users = status.get("User") or {}
-    paths: dict[str, dict] = {}
-    for node in (status.get("Peer") or {}).values():
-        if not isinstance(node, dict):
-            continue
-        profile = users.get(str(node.get("UserID"))) if isinstance(users, dict) else None
-        login = profile.get("LoginName") if isinstance(profile, dict) else None
-        if not login:
-            continue
-        entry = {
-            "direct": bool(node.get("CurAddr")),
-            "relay": node.get("Relay") or None,
-            "online": bool(node.get("Online")),
-            "last_write_s": age(node.get("LastWrite")),
-            "last_handshake_s": age(node.get("LastHandshake")),
-        }
-        current = paths.get(login)
-        if current is None:
-            paths[login] = entry
-            continue
-        # Keep the device we most recently wrote to; None (never) always loses.
-        old_age, new_age = current["last_write_s"], entry["last_write_s"]
-        if old_age is None or (new_age is not None and new_age < old_age):
-            paths[login] = entry
-    return paths
-
-
-def attribute_by_last_write(paths: dict[str, dict], count: int, max_age_s: float,
-                            excluded: frozenset[str] = frozenset()) -> list[str]:
-    """Candidate attribution: the ``count`` peers written to most recently.
-
-    Shadow-run beside the production byte-rate path so the two can be compared on real sessions
-    before anything is switched. A peer we have not written to within ``max_age_s`` is not
-    exchanging traffic with this host and cannot be one of the game's connected clients.
-    """
-    if count <= 0:
-        return []
-    fresh = [(info["last_write_s"], login) for login, info in paths.items()
-             if login not in excluded and info["last_write_s"] is not None and info["last_write_s"] <= max_age_s]
-    fresh.sort()
-    return sorted(login for _, login in fresh[:count])
-
-
 def conntrack_flows(port: int, conntrack_bin: str) -> list[str]:
     try:
         result = subprocess.run([conntrack_bin, "-L", "-p", "udp", "--dport", str(port)],
@@ -178,7 +116,7 @@ def main() -> int:
         active = pm.is_unit_active(args.instance, args.systemctl_bin)
 
         try:
-            paths = parse_peer_paths(json.loads(status_raw)) if status_raw else {}
+            paths = pm.parse_peer_paths(json.loads(status_raw)) if status_raw else {}
         except json.JSONDecodeError:
             paths = {}
         peer_rows = []
@@ -196,11 +134,13 @@ def main() -> int:
                               "last_write_s": (round(path["last_write_s"]) if path.get("last_write_s") is not None else None),
                               "last_handshake_s": (round(path["last_handshake_s"]) if path.get("last_handshake_s") is not None else None)})
 
-        would = [] if count is None else pm.attribute_by_count(ranked, count, pm.DEFAULT_ATTRIBUTION_FLOOR_KBPS)
+        # Production signal since 2026-08-27: write-recency, the only one populated for DERP peers.
+        would = [] if count is None else pm.attribute_by_write_recency(
+            paths, count, max_age_s=pm.DEFAULT_MAX_WRITE_AGE_S)
         unnamed = (count - len(would)) if count is not None else None
-        # Shadow candidate: rank by write-recency instead of byte rate. Recorded, never acted on --
-        # the comparison across a real multi-player session is what decides whether to switch.
-        by_write = [] if count is None else attribute_by_last_write(paths, count, max_age_s=args.interval * 2)
+        # Shadow the superseded byte-rate ranking so regressions stay visible and the two signals
+        # can still be compared on real sessions. Recorded, never acted on.
+        by_bytes = [] if count is None else pm.attribute_by_count(ranked, count, pm.DEFAULT_ATTRIBUTION_FLOOR_KBPS)
 
         flows = conntrack_flows(args.port, args.conntrack_bin)
         ip_login: dict[str, str] = {}
@@ -233,7 +173,7 @@ def main() -> int:
                 append_jsonl(args.log_jsonl, {
                     "ts": pm.now(), "instance": args.instance, "reason": reason,
                     "count": count, "attributed": would, "unnamed": unnamed,
-                    "attributed_by_last_write": by_write,
+                    "attributed_by_byte_rate": by_bytes,
                     "unit_active": active, "dt": round(dt, 1),
                     "peers": peer_rows,
                     "conntrack": {"flows": len(flows), "logins": named},
@@ -256,8 +196,8 @@ def main() -> int:
             else:
                 short = f"   *** {unnamed} PLAYER(S) UNNAMED ***" if unnamed else ""
                 print(f"  -> meter records: count={count} present={would}{short}")
-                agree = "same" if by_write == would else "DIFFERS"
-                print(f"  -> by last-write:  count={count} present={by_write}   ({agree})")
+                agree = "same" if by_bytes == would else "DIFFERS"
+                print(f"  -> byte-rate (old): count={count} present={by_bytes}   ({agree})")
             print(f"  conntrack udp dport {args.port}: {len(flows)} flow(s) -> {named if named else 'none'}")
             for line in flows[:6]:
                 print(f"      {line}")

@@ -78,16 +78,16 @@ interesting = [r for r in records if r.get("reason") not in ("heartbeat", "start
 print(f"--- last 25 cycles with players or a failure ({len(interesting)} total) ---")
 for r in interesting[-25:]:
     named = ",".join(r.get("attributed") or []) or "-"
-    by_write = r.get("attributed_by_last_write")
+    by_bytes = r.get("attributed_by_byte_rate")
     ct = r.get("conntrack") or {}
     ctl = ",".join(ct.get("logins") or []) or "-"
     print(f"{r['ts'][11:19]}  count={r.get('count')} unnamed={r.get('unnamed')} "
           f"named=[{named}]  conntrack={ct.get('flows')} [{ctl}]")
-    if by_write is not None:
-        # The candidate identity signal, shadow-computed. A DIFFERS line on a session with a
-        # DERP-relayed player is the evidence for switching attribution over to it.
-        verdict = "same" if by_write == (r.get("attributed") or []) else "*** DIFFERS ***"
-        print(f"      by last-write: [{','.join(by_write) or '-'}]  {verdict}")
+    if by_bytes is not None:
+        # The superseded byte-rate ranking, shadow-computed. DIFFERS is expected whenever a
+        # DERP-relayed player is connected: byte counters read 0 for them, so it names too few.
+        verdict = "same" if by_bytes == (r.get("attributed") or []) else "*** DIFFERS ***"
+        print(f"      byte-rate (old): [{','.join(by_bytes) or '-'}]  {verdict}")
     for peer in (r.get("peers") or [])[:6]:
         path = "direct" if peer.get("direct") else "DERP"
         wrote = f"{peer['last_write_s']}s" if peer.get("last_write_s") is not None else "never"

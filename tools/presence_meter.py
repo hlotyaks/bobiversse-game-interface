@@ -10,11 +10,11 @@ record ``{"ts", "instance", "present": [logins]}`` and differ only in how they o
   ``client -> game-port`` flow (verified 2026-07-18 -- see docs/presence-source-conntrack-findings.md).
   How many clients are connected comes from the game itself when we can read it (Enshrouded logs a
   per-machine ``OperatingNormally`` block every ~30s); *who* they are comes from ``tailscale status
-  --json``, attributing the reported client count to the busiest tailnet peers. Real per-client game
-  traffic is far below any usable bandwidth threshold, so the game's own count -- not a kbps cutoff
-  -- is what distinguishes a player from someone merely idling on the tailnet. Games without an
-  occupancy reader fall back to the ``--min-kbps`` traffic-rate heuristic. Attribution is gated to
-  instances whose systemd unit is active.
+  --json``, attributing that count to the peers the engine wrote to most recently (``LastWrite``).
+  Write-recency replaced byte-rate ranking on 2026-08-27: ``RxBytes``/``TxBytes`` are populated only
+  for peers with a direct path, so every DERP-relayed player read 0 and was invisible to
+  attribution. Games without an occupancy reader still fall back to the ``--min-kbps`` traffic-rate
+  heuristic. Attribution is gated to instances whose systemd unit is active.
 
 - ``conntrack`` (for a future cloud / public-IP deployment *without* Tailscale): when clients
   connect directly to the published UDP port, ``conntrack -L`` shows their source addresses and we
@@ -56,6 +56,14 @@ DEFAULT_ATTRIBUTION_FLOOR_KBPS = 1.0
 # 0.5 keeps a real player ranked ahead of an idle peer's one-cycle burst or the player's own
 # transient tailscale counter reset (both observed misattributing a solo slot on 2026-07-19).
 DEFAULT_RATE_SMOOTHING = 0.5
+# Identity signal. "last-write" ranks peers by how recently the engine wrote them a packet and is
+# the default because it is the only signal populated for DERP-relayed peers; "byte-rate" is the
+# superseded ranking, kept so the change is a config flip and the old behaviour stays testable.
+DEFAULT_ATTRIBUTION = "last-write"
+# A peer not written to within this many seconds is not exchanging traffic with the host and cannot
+# be one of the game's connected clients. Two meter cycles, so a single jittery sample cannot drop
+# a player who is plainly still connected.
+DEFAULT_MAX_WRITE_AGE_S = 120.0
 
 
 # --------------------------------------------------------------------------- shared
@@ -191,6 +199,81 @@ def attribute_by_count(ranked: list[tuple[float, str]], count: int, floor_kbps: 
     return sorted(login for rate, login in ranked[:count] if rate > floor_kbps)
 
 
+def parse_peer_paths(status: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per-login connection path and write-recency from ``tailscale status --json``.
+
+    Devices under one login collapse to the *most recently written* one, matching how
+    ``parse_status_peers`` merges them.
+
+    ``LastWrite`` is when the local engine last sent this peer a packet. It is the identity signal
+    because it is populated for every peer, where ``RxBytes``/``TxBytes`` are populated **only for
+    peers with an established direct path** -- a DERP-relayed peer reads 0 however much game traffic
+    it is exchanging. Ranking by byte rate therefore could not see a relayed player at all, which is
+    why 2026-08-23 logged three connected clients for 2.3h against a ledger that named nobody. It is
+    also not refreshed by mere presence: an online but idle peer measured 35 hours stale while a
+    player read 0s, so recency genuinely separates playing from lurking.
+    """
+    now_dt = datetime.now(UTC)
+
+    def age_seconds(value: Any) -> float | None:
+        # Tailscale writes the zero time as "0001-01-01T00:00:00Z" for "never".
+        if not isinstance(value, str) or value.startswith("0001"):
+            return None
+        try:
+            return (now_dt - datetime.fromisoformat(value.replace("Z", "+00:00"))).total_seconds()
+        except ValueError:
+            return None
+
+    users = status.get("User") or {}
+    paths: dict[str, dict[str, Any]] = {}
+    for node in (status.get("Peer") or {}).values():
+        if not isinstance(node, dict):
+            continue
+        profile = users.get(str(node.get("UserID"))) if isinstance(users, dict) else None
+        login = profile.get("LoginName") if isinstance(profile, dict) else None
+        if not login:
+            continue
+        entry = {
+            "direct": bool(node.get("CurAddr")),
+            "relay": node.get("Relay") or None,
+            "online": bool(node.get("Online")),
+            "last_write_s": age_seconds(node.get("LastWrite")),
+            "last_handshake_s": age_seconds(node.get("LastHandshake")),
+        }
+        current = paths.get(login)
+        if current is None:
+            paths[login] = entry
+            continue
+        previous_age, new_age = current["last_write_s"], entry["last_write_s"]
+        if previous_age is None or (new_age is not None and new_age < previous_age):
+            paths[login] = entry
+    return paths
+
+
+def attribute_by_write_recency(paths: dict[str, dict[str, Any]], count: int, max_age_s: float,
+                               excluded: frozenset[str] = frozenset()) -> list[str]:
+    """Assign the game's ``count`` connected clients to the peers written to most recently.
+
+    A peer the engine has not written to within ``max_age_s`` is not exchanging traffic with this
+    host and cannot be one of the connected clients, so it is never selected -- we would rather
+    under-report than bill the wrong person. Ranking is purely by recency: byte rate is deliberately
+    *not* used as a tiebreak, because a DERP-relayed player's byte counters read 0 and would lose
+    every tie to a direct-path peer with an idle SSH session.
+
+    Where this is still ambiguous -- an administrator whose dashboard or SSH traffic is written just
+    as recently as a player's game traffic -- the per-game exclusion list is the remedy, applied by
+    the caller before selection.
+    """
+    if count <= 0:
+        return []
+    fresh = [(info["last_write_s"], login) for login, info in paths.items()
+             if login not in excluded
+             and info.get("last_write_s") is not None
+             and info["last_write_s"] <= max_age_s]
+    fresh.sort()
+    return sorted(login for _, login in fresh[:count])
+
+
 def enshrouded_client_count(log_text: str) -> int | None:
     """Connected-client count from the most recent *complete* Enshrouded ``Machines:`` block.
 
@@ -293,16 +376,21 @@ def instance_templates(catalog: dict[str, Any]) -> dict[str, str]:
     return mapping
 
 
-def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS, alpha: float = DEFAULT_RATE_SMOOTHING, exclude_logins: frozenset[str] = frozenset(), template_exclusions: dict[str, frozenset[str]] | None = None) -> None:
+def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS, alpha: float = DEFAULT_RATE_SMOOTHING, exclude_logins: frozenset[str] = frozenset(), template_exclusions: dict[str, frozenset[str]] | None = None, attribution: str = DEFAULT_ATTRIBUTION, max_write_age_s: float = DEFAULT_MAX_WRITE_AGE_S) -> None:
     status_raw = _run([tailscale_bin, "status", "--json"])
     try:
-        peers = parse_status_peers(json.loads(status_raw)) if status_raw else {}
+        status = json.loads(status_raw) if status_raw else {}
     except json.JSONDecodeError:
-        peers = {}
+        status = {}
+    if not isinstance(status, dict):
+        status = {}
+    peers = parse_status_peers(status)
+    paths = parse_peer_paths(status)
     # Global exclusions (--exclude-login): logins that are never a player of *any* game (e.g. a
     # monitoring bot). Drop them entirely before attribution so they can't be ranked into any slot.
     if exclude_logins:
         peers = {login: info for login, info in peers.items() if login not in exclude_logins}
+        paths = {login: info for login, info in paths.items() if login not in exclude_logins}
     now_mono = time.monotonic()
     dt = (now_mono - state["t"]) if state.get("t") is not None else 0.0
     previous_bytes = state.get("bytes", {})
@@ -326,8 +414,11 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
                 # can skip the sample instead of reading an empty list as "nobody was playing".
                 count = instance_client_count(template_id, f"game-{key}", docker_bin)
                 if count is not None:
-                    ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
-                    present = attribute_by_count(ranked_for_instance, count, floor_kbps)
+                    if attribution == "byte-rate":
+                        ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
+                        present = attribute_by_count(ranked_for_instance, count, floor_kbps)
+                    else:
+                        present = attribute_by_write_recency(paths, count, max_write_age_s, excluded)
             else:
                 # No game-occupancy reader for this template -- fall back to the rate threshold.
                 present = [login for login in playing_logins(peers, previous_bytes, dt, min_kbps) if login not in excluded]
@@ -418,7 +509,16 @@ def main() -> int:
     parser.add_argument("--source", choices=["tailscale", "conntrack"], default="tailscale",
                         help="presence source (default tailscale; conntrack is for a future non-Tailscale deployment)")
     parser.add_argument("--min-kbps", type=float, default=DEFAULT_MIN_KBPS,
-                        help="tailscale source: minimum per-peer traffic rate to count as playing")
+                        help="tailscale source: minimum per-peer traffic rate to count as playing "
+                             "(only the fallback for games with no occupancy reader)")
+    parser.add_argument("--attribution", choices=["last-write", "byte-rate"], default=DEFAULT_ATTRIBUTION,
+                        help="which signal names the game's connected clients. 'last-write' (default) "
+                             "ranks peers by how recently the engine wrote to them and is the only "
+                             "signal that works for DERP-relayed peers; 'byte-rate' is the superseded "
+                             "ranking, which cannot see a relayed player at all.")
+    parser.add_argument("--max-write-age", type=float, default=DEFAULT_MAX_WRITE_AGE_S, metavar="SECONDS",
+                        help="last-write attribution: a peer not written to within this many seconds "
+                             "is never selected (default two meter cycles)")
     parser.add_argument("--interval", type=int, default=60, help="seconds between samples (0 = one cycle then exit)")
     parser.add_argument("--exclude-login", action="append", default=[], metavar="LOGIN",
                         help="tailscale login that is never a player of ANY game (e.g. a monitoring bot); "
@@ -451,7 +551,7 @@ def main() -> int:
         else:
             # Read fresh each cycle so admin edits via the interface apply without a restart.
             template_exclusions = load_exclusions(args.exclusions_file)
-            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, args.docker_bin, state, args.min_kbps, exclude_logins=exclude_logins, template_exclusions=template_exclusions)
+            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, args.docker_bin, state, args.min_kbps, exclude_logins=exclude_logins, template_exclusions=template_exclusions, attribution=args.attribution, max_write_age_s=args.max_write_age)
 
     if args.interval <= 0:
         cycle()

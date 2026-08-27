@@ -10,7 +10,7 @@ User=root
 Group=root
 # Default source is 'tailscale': connected-client COUNT comes from the game itself (Enshrouded's
 # per-machine log block, read via `docker logs`), and identity comes from `tailscale status --json`
-# by attributing that count to the busiest tailnet peers (players reach the game inside the
+# by attributing that count to the most recently written tailnet peers (players reach the game inside the
 # WireGuard tunnel, which conntrack cannot see here -- see docs/presence-source-conntrack-findings.md).
 # Gated to active game units. Appends one occupancy record per instance per cycle to the presence
 # ledger. No game data or secrets. `--min-kbps` is only the fallback for games without an occupancy
@@ -23,7 +23,12 @@ Group=root
 #                             -- per-game: admin-managed via the interface, re-read every cycle
 #                                (no restart). Use this for someone who is a non-player of one game
 #                                but plays others (e.g. an admin who doesn't play Enshrouded).
-ExecStart=/usr/local/libexec/game-server-interface/presence_meter.py --interval 60 --source tailscale --min-kbps 25
+# --attribution last-write names the game's clients by which peers the engine most recently sent a
+# packet to. It replaced byte-rate ranking on 2026-08-27: tailscale reports RxBytes/TxBytes only for
+# peers with a direct path, so every DERP-relayed player read 0 and was invisible. Pass
+# --attribution byte-rate to fall back to the old ranking.
+ExecStart=/usr/local/libexec/game-server-interface/presence_meter.py --interval 60 --source tailscale \
+    --attribution last-write --max-write-age 120 --min-kbps 25
 Restart=on-failure
 RestartSec=15s
 Nice=10

@@ -20,6 +20,16 @@ def _load_module(relative: str, name: str):
 METER = _load_module("tools/presence_meter.py", "presence_meter")
 
 
+def recent(seconds_ago: float = 1.0) -> str:
+    """A LastWrite timestamp ``seconds_ago`` in the past.
+
+    Attribution keys off write-recency, so run_cycle fixtures need a live timestamp rather than a
+    frozen literal; ordering between peers is what each test is actually asserting.
+    """
+    from datetime import UTC, datetime, timedelta
+    return (datetime.now(UTC) - timedelta(seconds=seconds_ago)).isoformat().replace("+00:00", "Z")
+
+
 # --- tailscale source (the default): identity + traffic-rate presence ------------------
 
 TAILSCALE_STATUS = {
@@ -176,8 +186,10 @@ class ExcludeLoginTests(unittest.TestCase):
         import tempfile, json, yaml
         from pathlib import Path
         status = {"User": {"2": {"LoginName": "player@ex"}, "9": {"LoginName": "hlotyaks@github"}},
-                  "Peer": {"p": {"UserID": 2, "Active": True, "RxBytes": 1_100_000, "TxBytes": 0},
-                           "a": {"UserID": 9, "Active": True, "RxBytes": 9_000_000, "TxBytes": 0}}}
+                  "Peer": {"p": {"UserID": 2, "Active": True, "RxBytes": 1_100_000, "TxBytes": 0,
+                                 "LastWrite": recent(2)},
+                           "a": {"UserID": 9, "Active": True, "RxBytes": 9_000_000, "TxBytes": 0,
+                                 "LastWrite": recent(1)}}}
         catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as d:
             ledger = Path(d) / "p.jsonl"
@@ -223,8 +235,10 @@ class PerGameExclusionTests(unittest.TestCase):
         import tempfile, json, yaml
         from pathlib import Path
         status = {"User": {"2": {"LoginName": "player@ex"}, "9": {"LoginName": "hlotyaks@github"}},
-                  "Peer": {"p": {"UserID": 2, "Active": True, "RxBytes": 1_100_000, "TxBytes": 0},
-                           "a": {"UserID": 9, "Active": True, "RxBytes": 9_000_000, "TxBytes": 0}}}
+                  "Peer": {"p": {"UserID": 2, "Active": True, "RxBytes": 1_100_000, "TxBytes": 0,
+                                 "LastWrite": recent(2)},
+                           "a": {"UserID": 9, "Active": True, "RxBytes": 9_000_000, "TxBytes": 0,
+                                 "LastWrite": recent(1)}}}
         catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as d:
             ledger = Path(d) / "p.jsonl"
@@ -273,8 +287,10 @@ class OccupancyUnknownTests(unittest.TestCase):
     """
 
     STATUS = {"User": {"2": {"LoginName": "player@ex"}, "9": {"LoginName": "admin@ex"}},
-              "Peer": {"p": {"UserID": 2, "Active": True, "RxBytes": 1_040_000, "TxBytes": 0},
-                       "a": {"UserID": 9, "Active": True, "RxBytes": 9_000_000, "TxBytes": 0}}}
+              "Peer": {"p": {"UserID": 2, "Active": True, "RxBytes": 1_040_000, "TxBytes": 0,
+                             "LastWrite": recent(2)},
+                       "a": {"UserID": 9, "Active": True, "RxBytes": 9_000_000, "TxBytes": 0,
+                             "LastWrite": recent(1)}}}
 
     def _cycle(self, count):
         import tempfile, json, yaml
@@ -324,3 +340,79 @@ class OccupancyUnknownTests(unittest.TestCase):
         valheim = [r for r in rows if r["instance"] == "valheim-primary"][0]
         self.assertEqual(valheim["present"], ["admin@ex"])  # only peer above 25 kbps
         self.assertEqual(valheim["count"], 1)
+
+
+class WriteRecencyAttributionTests(unittest.TestCase):
+    """Identity by LastWrite -- the signal that survives DERP relaying.
+
+    Byte counters are populated only for peers with a direct path, so a relayed player reads 0 and
+    byte-rate ranking cannot see them. That is what emptied the ledger through the 2026-08-23
+    session while the game logged three connected clients for 2.3h.
+    """
+
+    NOW = "2026-08-27T14:00:00Z"
+
+    def _status(self, peers):
+        """peers: [(login, last_write_iso, curaddr)] -> a tailscale status --json shape."""
+        users = {str(i): {"LoginName": login} for i, (login, _, _) in enumerate(peers)}
+        nodes = {}
+        for i, (_, last_write, curaddr) in enumerate(peers):
+            nodes[f"n{i}"] = {"UserID": i, "LastWrite": last_write, "CurAddr": curaddr,
+                              "Online": True, "Relay": "nyc", "RxBytes": 0, "TxBytes": 0}
+        return {"User": users, "Peer": nodes}
+
+    def test_relayed_players_are_visible_where_byte_rate_saw_nothing(self) -> None:
+        # Three connected clients, all DERP-relayed, all with zero byte counters.
+        status = self._status([
+            ("alice@ex", "2026-08-27T13:59:59.9Z", ""),
+            ("bob@ex", "2026-08-27T13:59:59.8Z", ""),
+            ("cara@ex", "2026-08-27T13:59:59.7Z", ""),
+            ("lurker@ex", "2026-08-26T00:00:00Z", ""),
+        ])
+        paths = METER.parse_peer_paths(status)
+        named = METER.attribute_by_write_recency(paths, count=3, max_age_s=120.0)
+        self.assertEqual(named, ["alice@ex", "bob@ex", "cara@ex"])
+        # The superseded signal names nobody: every relayed peer reports zero bytes.
+        peers = METER.parse_status_peers(status)
+        ewma = METER.update_rate_ewma({}, peers, {login: 0 for login in peers}, dt=60.0, alpha=0.5)
+        ranked = METER.rank_by_smoothed_rate(ewma)
+        self.assertEqual(METER.attribute_by_count(ranked, 3, floor_kbps=1.0), [])
+
+    def test_a_stale_peer_is_never_selected(self) -> None:
+        # Game says two, but only one peer has been written to recently -- under-report, never
+        # reach back in time for a second name.
+        status = self._status([("alice@ex", "2026-08-27T13:59:59Z", ""),
+                               ("lurker@ex", "2026-08-27T13:00:00Z", "")])
+        paths = METER.parse_peer_paths(status)
+        self.assertEqual(METER.attribute_by_write_recency(paths, 2, max_age_s=120.0), ["alice@ex"])
+
+    def test_never_written_peer_is_skipped(self) -> None:
+        status = self._status([("alice@ex", "2026-08-27T13:59:59Z", ""),
+                               ("fresh@ex", "0001-01-01T00:00:00Z", "")])
+        paths = METER.parse_peer_paths(status)
+        self.assertIsNone(paths["fresh@ex"]["last_write_s"])
+        self.assertEqual(METER.attribute_by_write_recency(paths, 2, max_age_s=120.0), ["alice@ex"])
+
+    def test_exclusions_pass_the_slot_to_the_next_real_player(self) -> None:
+        # The admin is written to most recently (dashboard traffic) but is excluded from this game,
+        # so the single slot must fall through to the player rather than be spent on them.
+        status = self._status([("admin@ex", "2026-08-27T13:59:59.99Z", "1.2.3.4:41641"),
+                               ("player@ex", "2026-08-27T13:59:59.5Z", "")])
+        paths = METER.parse_peer_paths(status)
+        named = METER.attribute_by_write_recency(paths, 1, max_age_s=120.0,
+                                                 excluded=frozenset({"admin@ex"}))
+        self.assertEqual(named, ["player@ex"])
+
+    def test_devices_collapse_to_the_most_recently_written(self) -> None:
+        status = {"User": {"1": {"LoginName": "alice@ex"}},
+                  "Peer": {"old": {"UserID": 1, "LastWrite": "2026-08-01T00:00:00Z", "CurAddr": ""},
+                           "new": {"UserID": 1, "LastWrite": "2026-08-27T13:59:59Z", "CurAddr": "1.2.3.4:1"}}}
+        paths = METER.parse_peer_paths(status)
+        self.assertEqual(len(paths), 1)
+        self.assertLess(paths["alice@ex"]["last_write_s"], 120.0)
+        self.assertTrue(paths["alice@ex"]["direct"])
+
+    def test_zero_count_names_nobody(self) -> None:
+        status = self._status([("alice@ex", "2026-08-27T13:59:59Z", "")])
+        paths = METER.parse_peer_paths(status)
+        self.assertEqual(METER.attribute_by_write_recency(paths, 0, max_age_s=120.0), [])

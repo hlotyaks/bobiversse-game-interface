@@ -96,10 +96,16 @@ was online at the time of measurement with a `LastWrite` 35 hours stale. So "the
 most recently" should name exactly the game's N connected clients, where "the N busiest peers by
 byte rate" structurally cannot.
 
-This is **not yet switched on.** `scripts/observe-presence.py` computes it every cycle alongside the
-production byte-rate attribution and records both (`attributed` vs `attributed_by_last_write`), so a
-real multi-player session decides it on evidence. The two agree on a direct-path solo player; the
-DERP case is what needs observing.
+**Switched on 2026-08-27** as `--attribution last-write` (the meter's default). Enshrouded is a
+test bed for the metering process rather than a live billing system, so the cost of adopting the
+better-supported signal immediately is nil, while leaving relayed players unnameable would have
+kept collecting data with a known hole in it. `--attribution byte-rate` restores the old ranking,
+and `scripts/observe-presence.py` now shadow-logs it every cycle (`attributed_by_byte_rate`) so the
+two stay comparable and a regression stays visible.
+
+Still worth confirming on a real multi-player session: the DERP case has been reasoned from peer
+state, not yet watched with two people connected. Expect the observer to print `DIFFERS` there, with
+byte-rate naming too few.
 
 ## The working source (tailscale)
 

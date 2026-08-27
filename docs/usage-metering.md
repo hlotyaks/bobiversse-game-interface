@@ -26,8 +26,15 @@ count — so identity comes from the network layer. The meter has two interchang
     per-machine block every ~30s (`m#N(...) … OperatingNormally`, the server's own entry excluded);
     the meter reads it via `docker logs`. This is authoritative and needs no tuning.
   - **Who** they are comes from `tailscale status --json`: the reported client count is attributed
-    to the busiest tailnet peers by traffic rate. Identity is the Tailscale login, the same one the
-    dashboard uses, so there is **no separate login system**.
+    to the peers the local engine wrote to most recently (`LastWrite`). Identity is the Tailscale
+    login, the same one the dashboard uses, so there is **no separate login system**.
+
+    Write-recency replaced traffic-rate ranking on 2026-08-27. `RxBytes`/`TxBytes` are populated
+    **only for peers with a direct path** — a DERP-relayed peer reads `0` however much game traffic
+    it is exchanging — so byte-rate ranking could not see a relayed player at all. `LastWrite` is
+    populated for every peer and is not refreshed by mere presence (an online but idle peer measured
+    35 hours stale while a player read 0s). A peer not written to within `--max-write-age` seconds
+    (default 120, two cycles) is never selected. `--attribution byte-rate` restores the old ranking.
 
   This replaced an earlier "peer is `Active` and above `--min-kbps`" heuristic that silently
   undercounted: real per-client Enshrouded traffic (~single-digit kbps) sits far below any usable
@@ -43,9 +50,9 @@ count — so identity comes from the network layer. The meter has two interchang
 Attribution assumes the game's connected clients are the busiest tailnet peers. Two mechanisms keep
 that honest:
 
-- **Smoothing.** Per-peer rates are EWMA-smoothed, so a single-cycle burst or a player's transient
-  tailscale counter reset no longer flips a slot to the wrong person (observed crediting a solo
-  player's time to a bystander before smoothing).
+- **Smoothing.** Per-peer traffic rates are EWMA-smoothed. This mattered when byte rate drove
+  attribution; it is now only used by the `--min-kbps` fallback for games with no occupancy reader,
+  and by the observer's shadow comparison.
 - **Exclusions.** Some tailnet peers are *never* players — a server admin or dashboard-only user
   whose HTTPS/SSH traffic to the host is indistinguishable by volume from game traffic. There are
   two ways to exclude them, both applied before attribution so a game's slots go to actual players:
@@ -87,9 +94,11 @@ reader for another game is a small function keyed by template in
 The meter answers two questions per cycle and they fail independently:
 
 - **How many** — the game's own count. Reliable.
-- **Who** — bandwidth ranking over tailnet peers. **This is the weak half**, and it has now failed
-  three times (the original `--min-kbps` undercount, the transient-burst misattribution that EWMA
-  smoothing addressed, and the 2026-08 blackout below).
+- **Who** — write-recency over tailnet peers. **This is the weak half**: it failed three times as
+  bandwidth ranking (the original `--min-kbps` undercount, the transient-burst misattribution EWMA
+  smoothing addressed, and the 2026-08 blackout below, whose root cause was that byte counters are
+  direct-path only). Write-recency addresses the known cause; it is still a heuristic, and the
+  observer shadow-logs the old signal so a regression stays visible.
 
 The ledger therefore records **both** numbers. When the game says three clients and the meter can
 only name one, that is written down as `{"present": ["a@ex"], "count": 3}` and the bill charges the
