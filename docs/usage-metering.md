@@ -16,9 +16,10 @@ This is the first of two stages toward the cost-sharing feature described in
 Enshrouded does not log player identity — its stdout only reports an anonymous connected-machine
 count — so identity comes from the network layer. The meter has two interchangeable sources:
 
-- **`tailscale` (default).** Players reach the game over the tailnet, so their packets travel
-  inside the WireGuard tunnel and the kernel's conntrack never sees a `client → game-port` flow
-  (this was verified on bobiverse; full evidence in
+- **`tailscale` (default).** Players reach the game over the tailnet. A 2026-07-18 test found no
+  `client → game-port` flow in conntrack and concluded the tunnel hid it; that conclusion was
+  **over-generalised and is now partly retracted** — tailnet traffic *is* conntrack-tracked, and
+  whether the game's UDP flows appear is an open question with a live re-test pending (see
   [presence-source-conntrack-findings.md](presence-source-conntrack-findings.md)). The meter splits
   the question into **how many** and **who**:
   - **How many** connected clients there are comes from the *game itself*. Enshrouded logs a
@@ -34,8 +35,9 @@ count — so identity comes from the network layer. The meter has two interchang
   traffic leaked through. The game's own count is the reliable player/idle discriminator. Games
   **without** an occupancy reader still fall back to the `--min-kbps` traffic-rate heuristic.
   Presence is attributed only to instances whose systemd unit is active.
-- **`conntrack`.** Watches `conntrack -L` for direct `client → game-port` flows. This is blind under
-  Tailscale (above) but is the right source for a future cloud/public-IP deployment without the
+- **`conntrack`.** Watches `conntrack -L` for direct `client → game-port` flows, naming each client
+  exactly rather than ranking by bandwidth. Believed blind under Tailscale (above) — a belief now
+  under re-test — and the right source for a future cloud/public-IP deployment without the
   WireGuard tunnel. Preserved and tested; switch with `--source conntrack`.
 
 Attribution assumes the game's connected clients are the busiest tailnet peers. Two mechanisms keep
@@ -74,10 +76,53 @@ reader for another game is a small function keyed by template in
 
 | Piece | File | Role |
 | --- | --- | --- |
-| Presence meter | [tools/presence_meter.py](../tools/presence_meter.py) | Root systemd service. Each cycle reads `tailscale status --json`, marks Active peers over the traffic-rate threshold as playing, attributes them to active game units, and appends an occupancy sample to the ledger. (`--source conntrack` swaps in the direct-flow source for non-Tailscale deployments.) |
-| Presence ledger | `/var/lib/game-server-interface/presence.jsonl` | Append-only JSONL, one line per instance per cycle: `{"ts","instance","present":[logins]}`. Root-owned, `0600` — it is playtime metadata (who played when); treat it as private, like the audit log. |
+| Presence meter | [tools/presence_meter.py](../tools/presence_meter.py) | Root systemd service. Each cycle reads the game's client count and `tailscale status --json`, attributes that count to the busiest tailnet peers of active game units, and appends an occupancy sample to the ledger. (`--source conntrack` swaps in the direct-flow source for non-Tailscale deployments.) |
+| Live observer | [scripts/observe-presence.py](../scripts/observe-presence.py) | Read-only. Run as root during a real session to watch the count, every peer's byte deltas/EWMA, what the meter would attribute, and the conntrack flows side by side. The tool for diagnosing a *who* failure. |
+| Presence ledger | `/var/lib/game-server-interface/presence.jsonl` | Append-only JSONL, one line per instance per cycle: `{"ts","instance","present":[logins],"count":N}`. `count` is the game's own client count and `present` is only who the meter could name, so `count >= len(present)`; `"count": null` means the occupancy read failed (unknown, *not* nobody). Root-owned, `0600` — it is playtime metadata (who played when); treat it as private, like the audit log. |
 | Billing config | [deploy/etc/game-server-interface/billing.yaml](../deploy/etc/game-server-interface/billing.yaml) | Nominal per-instance run-cost and the group-size multiplier schedule `m(n)`. No secrets. |
 | Billing calculator | [tools/billing.py](../tools/billing.py) | Pure calculator over the ledger. Produces per-user hours, solo/group split, sessions, and the dry-run bill (text or `--json`). |
+
+## Counting and naming are separate problems
+
+The meter answers two questions per cycle and they fail independently:
+
+- **How many** — the game's own count. Reliable.
+- **Who** — bandwidth ranking over tailnet peers. **This is the weak half**, and it has now failed
+  three times (the original `--min-kbps` undercount, the transient-burst misattribution that EWMA
+  smoothing addressed, and the 2026-08 blackout below).
+
+The ledger therefore records **both** numbers. When the game says three clients and the meter can
+only name one, that is written down as `{"present": ["a@ex"], "count": 3}` and the bill charges the
+group rate `m(3)/3` for the person it named, reports the other two player-hours as
+**UNATTRIBUTED**, and leaves their share unbilled. It does *not* silently read a one-name list as
+solo play — which is exactly what produced the bad August bill:
+
+> **2026-08 incident.** Enshrouded logged three connected clients continuously from 19:11 to 21:44
+> on 2026-08-23; the ledger recorded `present: []` for that entire window, and no peer's
+> `tailscale status --json` byte counters moved enough to clear the 1.0 kbps attribution floor.
+> Separately, whenever the occupancy read failed the meter fell back to `--min-kbps 25` and
+> credited the top talker — an idle SSH session to this host measures ~24 kbps, so an administrator
+> was repeatedly billed for solo play the game never saw. August's report read
+> "players: 2, solo share 100%" for an evening that had four people in it.
+
+The `count` field fixes the *billing* consequence. It does not fix the *naming* half. For that,
+`game-presence-observer.service` runs continuously alongside the meter, recording what attribution
+*saw* rather than only what it concluded — the game's client count, every peer's byte counters and
+derived kbps/EWMA, who would be named, and the conntrack flows on the game port. Read it with:
+
+    sudo /usr/local/sbin/gsi-diagnose observer
+
+It logs only cycles that carry information (someone connected, the occupancy read failed, a client
+went unnamed) plus a heartbeat every 20th cycle, so an idle server writes ~150 records a day into
+`/var/lib/game-server-interface/presence-observer.jsonl` (root-owned `0600`, rotated weekly, 16
+weeks kept). A *single* player logging in is a useful test on its own: if the log shows
+`count=1 unnamed=1`, the naming failure reproduces with one person and no coordination. See also
+[presence-source-conntrack-findings.md](presence-source-conntrack-findings.md), whose central
+claim (that conntrack cannot see tailnet traffic) has been shown to be wrong.
+
+**A game that reports its own occupancy never falls back to bandwidth ranking.** A failed read is
+recorded as unknown and billed as nothing. The `--min-kbps` fallback now applies only to games with
+no entry in `OCCUPANCY_READERS`.
 
 ## The bill model
 
@@ -87,8 +132,10 @@ subsidizes group play. Charges therefore do **not** sum to the raw server cost p
 difference is the shared **kitty**, reported so the group can confirm it nets out over time. See
 the cost-analysis doc for the rationale and the tuning discussion.
 
-Occupancy is a step function between samples; a sample's duration is the gap to the next sample,
-capped at `max_gap_seconds` so meter downtime is never billed as continuous play.
+Here `n` is the **game's** reported client count, not how many of those clients the meter managed to
+identify. Occupancy is a step function between samples; a sample's duration is the gap to the next
+sample, capped at `max_gap_seconds` so meter downtime is never billed as continuous play. Samples
+with an unknown count are billed as nothing and totalled separately as `meter_blind_hours`.
 
 ## Install (root)
 

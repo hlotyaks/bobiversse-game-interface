@@ -9,12 +9,13 @@
 set -euo pipefail
 
 LEDGER=/var/lib/game-server-interface/presence.jsonl
+OBSERVER=/var/lib/game-server-interface/presence-observer.jsonl
 BILLING=/usr/local/libexec/game-server-interface/billing.py
 UNIT=game-presence-meter.service
 INSTANCE_RE='^[a-z0-9-]+$'
 
 usage() {
-  echo "usage: gsi-diagnose {ledger|bill|meter-log|all} [instance-id]" >&2
+  echo "usage: gsi-diagnose {ledger|bill|meter-log|observer|all} [instance-id]" >&2
   echo "  read-only. instance-id defaults to enshrouded-primary." >&2
   exit 2
 }
@@ -56,13 +57,45 @@ for inst, d in sorted(by.items()):
 PY
 }
 
+# Recent attribution evidence from game-presence-observer.service: the game's own client count,
+# who attribution named, and what conntrack saw. This is the log to read when a bill is missing
+# players -- the meter itself records only its conclusion, never how it reached it.
+observer_tail() {
+  python3 - "$OBSERVER" <<'OBS'
+import json, sys, collections
+try:
+    lines = open(sys.argv[1]).read().splitlines()
+except FileNotFoundError:
+    print("no observer log yet:", sys.argv[1]); sys.exit(0)
+records = [json.loads(l) for l in lines if l.strip()]
+if not records:
+    print("observer log is empty"); sys.exit(0)
+reasons = collections.Counter(r.get("reason") for r in records)
+print(f"{len(records)} record(s): " + ", ".join(f"{k}={v}" for k, v in reasons.most_common()))
+print(f"span: {records[0]['ts']} .. {records[-1]['ts']}")
+print()
+interesting = [r for r in records if r.get("reason") != "heartbeat"]
+print(f"--- last 25 non-heartbeat cycles ({len(interesting)} total) ---")
+for r in interesting[-25:]:
+    named = ",".join(r.get("attributed") or []) or "-"
+    ct = r.get("conntrack") or {}
+    ctl = ",".join(ct.get("logins") or []) or "-"
+    print(f"{r['ts'][11:19]}  count={r.get('count')} unnamed={r.get('unnamed')} "
+          f"named=[{named}]  conntrack={ct.get('flows')} [{ctl}]")
+    for peer in (r.get("peers") or [])[:4]:
+        print(f"      {peer['login']:<38} kbps={peer['kbps']} ewma={peer['ewma']} active={peer['active']}")
+OBS
+}
+
 case "$sub" in
   ledger)    ledger_stats ;;
+  observer)  observer_tail ;;
   bill)      "$BILLING" --instance "$inst" ;;
   meter-log) journalctl -u "$UNIT" --no-pager -n 120 ;;
   all)
     echo "########## presence ledger ##########"; ledger_stats
     echo; echo "########## billing ($inst) ##########"; "$BILLING" --instance "$inst" || true
-    echo; echo "########## meter journal (tail) ##########"; journalctl -u "$UNIT" --no-pager -n 40 ;;
+    echo; echo "########## meter journal (tail) ##########"; journalctl -u "$UNIT" --no-pager -n 40
+    echo; echo "########## attribution observer ##########"; observer_tail || true ;;
   *) usage ;;
 esac
