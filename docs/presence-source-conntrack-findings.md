@@ -28,7 +28,7 @@ With a friend actively in the Enshrouded world:
   - the game container reaching Steam — `src=172.19.0.2 … dport=270xx`,
   - LAN/DNS/SSDP noise.
 
-## Correction (2026-08-27): the blanket claim below is wrong
+## Correction (2026-08-27): right conclusion, wrong reason -- and the actual cause
 
 The conclusion in this section -- that Tailscale-delivered traffic produces no conntrack entries --
 was over-generalised from a single negative result, and it is what pushed the meter onto the
@@ -42,15 +42,16 @@ That is an SSH session arriving over `tailscale0`, tracked normally. Packets inj
 device traverse netfilter like any other. So "conntrack is blind under Tailscale" is not a property
 of Tailscale delivery.
 
-What remains genuinely unverified is the narrower question: whether a **UDP flow to the game port**
-shows up, given that Docker publishes it through the userland proxy (`docker-proxy -proto udp
--host-ip 100.84.161.38 -host-port 15636`, confirmed running). UDP conntrack entries are short-lived
-and the original 2026-07-18 test may simply have sampled at the wrong moment. This must be re-tested
-during a live session -- `scripts/observe-presence.py` prints the conntrack flows next to what the
-meter would attribute, precisely so the two can be compared with a real player connected.
+**The narrower claim, however, holds.** Re-tested on 2026-08-27 with a player connected and in the
+world for ~8 minutes: across every observer cycle of that session the game reported one client and
+`conntrack -L -p udp --dport 15636` returned **0 flows**, every time. Docker publishes the port
+through the userland proxy (`docker-proxy -proto udp -host-ip 100.84.161.38 -host-port 15636`), so
+the client's packets terminate on that socket and never become a trackable `client -> game-port`
+tuple. So conntrack is **not** a usable identity source for this deployment -- not because Tailscale
+hides the traffic, which it does not, but because of how the game port is published.
 
-If conntrack does see the game flows, it is a strictly better identity source than bandwidth
-ranking: it names each client exactly, with no threshold, no EWMA, and no exclusion list.
+Net: the original conclusion was right for the wrong reason. Do not revive `--source conntrack`
+here on the strength of the SSH evidence above.
 
 ## Why conntrack cannot see it (superseded -- see the correction above)
 
@@ -67,6 +68,38 @@ delivery.
 
 > **Superseded.** The final sentence is false as written -- see the 2026-08-27 correction above.
 > Tailnet traffic *is* conntrack-tracked; only the UDP-to-game-port case is still open.
+
+## What actually breaks attribution: byte counters are direct-path only (2026-08-27)
+
+`tailscale status --json` populates `RxBytes`/`TxBytes` **only for peers with an established direct
+path**. A DERP-relayed peer reads `0` no matter how much game traffic it is exchanging. Measured on
+bobiverse with one player in the world and five other peers online or recently seen:
+
+| login | path | Rx+Tx | LastWrite | LastHandshake |
+| --- | --- | --- | --- | --- |
+| cbrinton@… (playing) | direct `67.80.83.53:41641` | 6,686,432 | 0s ago | 108s ago |
+| hlotyaks@… | DERP | **0** | 127094s ago | never |
+| player-c@… | DERP | **0** | 251764s ago | never |
+| player-b@… | DERP | **0** | 396448s ago | never |
+| player-e@… | DERP | **0** | 129421s ago | never |
+| player-d@… | DERP | **0** | 318527s ago | never |
+
+Since attribution ranks peers by byte *rate* and drops anything at or below a 1.0 kbps floor, every
+DERP-relayed player is invisible to it — which is why the 2026-08-23 session logged three connected
+clients for 2.3h and the ledger recorded `present: []` throughout. Note `jxdaugherty`'s `LastWrite`
+of 396448s: that is ~4.6 days before the measurement, landing on that very session. The engine was
+writing packets to that peer; the byte counters simply never reflected it.
+
+**`LastWrite` is the promising replacement signal.** It is when the local engine last sent the peer
+a packet, it is populated for DERP peers, and it is *not* refreshed by mere presence — `hlotyaks`
+was online at the time of measurement with a `LastWrite` 35 hours stale. So "the N peers written to
+most recently" should name exactly the game's N connected clients, where "the N busiest peers by
+byte rate" structurally cannot.
+
+This is **not yet switched on.** `scripts/observe-presence.py` computes it every cycle alongside the
+production byte-rate attribution and records both (`attributed` vs `attributed_by_last_write`), so a
+real multi-player session decides it on evidence. The two agree on a direct-path solo player; the
+DERP case is what needs observing.
 
 ## The working source (tailscale)
 
