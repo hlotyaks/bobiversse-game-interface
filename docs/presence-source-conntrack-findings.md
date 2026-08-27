@@ -28,7 +28,31 @@ With a friend actively in the Enshrouded world:
   - the game container reaching Steam — `src=172.19.0.2 … dport=270xx`,
   - LAN/DNS/SSDP noise.
 
-## Why conntrack cannot see it
+## Correction (2026-08-27): the blanket claim below is wrong
+
+The conclusion in this section -- that Tailscale-delivered traffic produces no conntrack entries --
+was over-generalised from a single negative result, and it is what pushed the meter onto the
+bandwidth-ranking heuristic that has since mis-billed three separate ways. Measured on bobiverse
+on 2026-08-27, conntrack **does** track decrypted tailnet traffic:
+
+    # conntrack -L -s 100.64.0.0/10
+    tcp 6 431993 ESTABLISHED src=100.93.220.3 dst=100.84.161.38 sport=52340 dport=22 ...
+
+That is an SSH session arriving over `tailscale0`, tracked normally. Packets injected into the TUN
+device traverse netfilter like any other. So "conntrack is blind under Tailscale" is not a property
+of Tailscale delivery.
+
+What remains genuinely unverified is the narrower question: whether a **UDP flow to the game port**
+shows up, given that Docker publishes it through the userland proxy (`docker-proxy -proto udp
+-host-ip 100.84.161.38 -host-port 15636`, confirmed running). UDP conntrack entries are short-lived
+and the original 2026-07-18 test may simply have sampled at the wrong moment. This must be re-tested
+during a live session -- `scripts/observe-presence.py` prints the conntrack flows next to what the
+meter would attribute, precisely so the two can be compared with a real player connected.
+
+If conntrack does see the game flows, it is a strictly better identity source than bandwidth
+ranking: it names each client exactly, with no threshold, no EWMA, and no exclusion list.
+
+## Why conntrack cannot see it (superseded -- see the correction above)
 
 Players connect over the tailnet, so their game packets travel **inside the encrypted WireGuard
 tunnel** (the `41641↔41641` UDP flows are all conntrack sees). `tailscaled` decrypts them and
@@ -40,6 +64,9 @@ the conntrack layer — the traffic simply never appears there as a trackable cl
 
 This is not fixable by changing the watched port or filter. It is a property of Tailscale-tunnelled
 delivery.
+
+> **Superseded.** The final sentence is false as written -- see the 2026-08-27 correction above.
+> Tailnet traffic *is* conntrack-tracked; only the UDP-to-game-port case is still open.
 
 ## The working source (tailscale)
 

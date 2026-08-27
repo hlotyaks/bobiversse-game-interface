@@ -261,3 +261,66 @@ class CatalogPortTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OccupancyUnknownTests(unittest.TestCase):
+    """A game that reports its own occupancy must never fall back to the bandwidth heuristic.
+
+    Regression cover for the 2026-08 phantom billing: when ``docker logs`` returned nothing for
+    a cycle, ``instance_client_count`` gave None, the meter dropped to ``--min-kbps 25``, and the
+    only peer on this host that clears 25 kbps is an admin's SSH or dashboard session -- which
+    was then billed as solo play the game never saw.
+    """
+
+    STATUS = {"User": {"2": {"LoginName": "player@ex"}, "9": {"LoginName": "admin@ex"}},
+              "Peer": {"p": {"UserID": 2, "Active": True, "RxBytes": 1_040_000, "TxBytes": 0},
+                       "a": {"UserID": 9, "Active": True, "RxBytes": 9_000_000, "TxBytes": 0}}}
+
+    def _cycle(self, count):
+        import tempfile, json, yaml
+        from pathlib import Path
+        catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "p.jsonl"
+            state = {"bytes": {"player@ex": 1_000_000, "admin@ex": 1_000_000}, "rate_ewma": {}, "t": 0.0}
+            with unittest.mock.patch.object(METER, "_run", return_value=json.dumps(self.STATUS)), \
+                 unittest.mock.patch.object(METER, "is_unit_active", return_value=True), \
+                 unittest.mock.patch.object(METER, "instance_client_count", return_value=count), \
+                 unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
+                METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0)
+            rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+        return [r for r in rows if r["instance"] == "enshrouded-primary"][0]
+
+    def test_unreadable_occupancy_records_unknown_not_the_top_talker(self) -> None:
+        record = self._cycle(None)
+        self.assertEqual(record["present"], [])
+        self.assertIsNone(record["count"])  # explicit unknown, distinct from "count": 0
+
+    def test_a_readable_count_still_attributes(self) -> None:
+        record = self._cycle(1)
+        self.assertEqual(record["present"], ["admin@ex"])
+        self.assertEqual(record["count"], 1)
+
+    def test_ledger_records_the_game_count_alongside_the_names(self) -> None:
+        # The game says three; only two peers clear the floor. Both facts must survive to billing.
+        record = self._cycle(3)
+        self.assertEqual(record["count"], 3)
+        self.assertEqual(len(record["present"]), 2)
+
+    def test_a_game_without_a_reader_still_uses_the_fallback(self) -> None:
+        self.assertTrue(METER.has_occupancy_reader("enshrouded"))
+        self.assertFalse(METER.has_occupancy_reader("valheim"))
+        import tempfile, json, yaml
+        from pathlib import Path
+        catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "p.jsonl"
+            state = {"bytes": {"player@ex": 1_000_000, "admin@ex": 1_000_000}, "rate_ewma": {}, "t": 0.0}
+            with unittest.mock.patch.object(METER, "_run", return_value=json.dumps(self.STATUS)), \
+                 unittest.mock.patch.object(METER, "is_unit_active", return_value=True), \
+                 unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
+                METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0)
+            rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+        valheim = [r for r in rows if r["instance"] == "valheim-primary"][0]
+        self.assertEqual(valheim["present"], ["admin@ex"])  # only peer above 25 kbps
+        self.assertEqual(valheim["count"], 1)

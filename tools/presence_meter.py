@@ -231,12 +231,30 @@ def read_container_logs(container: str, docker_bin: str, since: str = "120s") ->
 
 
 def instance_client_count(template_id: str, container: str, docker_bin: str) -> int | None:
-    """Game-authoritative connected-client count for an instance, or None if we can't tell."""
+    """Game-authoritative connected-client count for an instance, or None if we can't tell.
+
+    ``None`` here means *unknown*, and callers must not confuse it with *nobody*. Note the two
+    distinct reasons it can be None: the template has no occupancy reader at all (see
+    ``has_occupancy_reader``), or it has one but the read failed / the logs held no complete
+    block. Only the first justifies falling back to the bandwidth heuristic.
+    """
     reader = OCCUPANCY_READERS.get(template_id)
     if reader is None:
         return None
     logs = read_container_logs(container, docker_bin)
     return reader(logs) if logs else None
+
+
+def has_occupancy_reader(template_id: str) -> bool:
+    """Whether this game reports its own connected-client count.
+
+    Gates the ``--min-kbps`` fallback. For a game that *does* report occupancy, a failed read is
+    an unknown, not an invitation to guess by bandwidth: the fallback ranks whoever is pushing the
+    most tailnet traffic, which on this host is an admin's SSH or dashboard session, and it was
+    silently billing them for solo play the game never saw (observed 2026-08, see
+    docs/usage-metering.md).
+    """
+    return template_id in OCCUPANCY_READERS
 
 
 def load_exclusions(exclusions_path: Path) -> dict[str, frozenset[str]]:
@@ -293,24 +311,32 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
     templates = instance_templates(catalog)
     template_exclusions = template_exclusions or {}
     for key in instance_ports(catalog):
-        if not is_unit_active(key, systemctl_bin):
-            present: list[str] = []
-        else:
+        present: list[str] = []
+        count: int | None = 0
+        if is_unit_active(key, systemctl_bin):
             template_id = templates.get(key, "")
             # Per-game exclusions: a login that is a non-player of *this* game (a server admin who
             # never plays Enshrouded but does play others). Applied per instance, not globally, so
             # the same login can still be attributed to a different game. Excluding before selection
             # means the slot passes to the next real player rather than being spent on a non-player.
             excluded = template_exclusions.get(template_id, frozenset())
-            count = instance_client_count(template_id, f"game-{key}", docker_bin)
-            if count is not None:
+            if has_occupancy_reader(template_id):
                 # Game-authoritative occupancy: attribute the reported N clients to the busiest peers.
-                ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
-                present = attribute_by_count(ranked_for_instance, count, floor_kbps)
+                # A failed read is recorded as an explicit unknown (count None) so the billing pass
+                # can skip the sample instead of reading an empty list as "nobody was playing".
+                count = instance_client_count(template_id, f"game-{key}", docker_bin)
+                if count is not None:
+                    ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
+                    present = attribute_by_count(ranked_for_instance, count, floor_kbps)
             else:
                 # No game-occupancy reader for this template -- fall back to the rate threshold.
                 present = [login for login in playing_logins(peers, previous_bytes, dt, min_kbps) if login not in excluded]
-        append_ledger(ledger_path, {"ts": now(), "instance": key, "present": present})
+                count = len(present)
+        # ``count`` is the game's own player count; ``present`` is only who we could put a name to.
+        # Recording both keeps the two separable downstream: billing must charge the group rate for
+        # a group of N even when it could only identify one of them, and must never apply the solo
+        # premium to a sample the game says had three people in it.
+        append_ledger(ledger_path, {"ts": now(), "instance": key, "present": present, "count": count})
     state["bytes"] = {login: int(info["bytes"]) for login, info in peers.items()}
     state["rate_ewma"] = ewma
     state["t"] = now_mono
