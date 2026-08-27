@@ -74,8 +74,8 @@ reasons = collections.Counter(r.get("reason") for r in records)
 print(f"{len(records)} record(s): " + ", ".join(f"{k}={v}" for k, v in reasons.most_common()))
 print(f"span: {records[0]['ts']} .. {records[-1]['ts']}")
 print()
-interesting = [r for r in records if r.get("reason") != "heartbeat"]
-print(f"--- last 25 non-heartbeat cycles ({len(interesting)} total) ---")
+interesting = [r for r in records if r.get("reason") not in ("heartbeat", "startup")]
+print(f"--- last 25 cycles with players or a failure ({len(interesting)} total) ---")
 for r in interesting[-25:]:
     named = ",".join(r.get("attributed") or []) or "-"
     ct = r.get("conntrack") or {}

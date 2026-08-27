@@ -141,7 +141,12 @@ def main() -> int:
             # failed, we could not name everyone, or a periodic heartbeat. Idle cycles are the
             # overwhelming majority and recording them would bury the ones that matter.
             reason = None
-            if count is None:
+            if cycle == 1:
+                # Always record the first cycle. Otherwise nothing is written until the first
+                # heartbeat, leaving a window after every restart where a working observer and a
+                # broken one look identical. This also captures the peer roster at startup.
+                reason = "startup"
+            elif count is None:
                 reason = "occupancy_unknown"
             elif unnamed:
                 reason = "unnamed_players"
