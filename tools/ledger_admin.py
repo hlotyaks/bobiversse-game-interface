@@ -10,6 +10,14 @@ mode ``0600`` -- the ledger is private playtime metadata.
 
     sudo tools/ledger_admin.py --remove-login hlotyaks@github            # default ledger path
     sudo tools/ledger_admin.py --remove-login bob@ex --ledger /path --dry-run
+
+A second correction retires a stretch of untrustworthy capture: ``--clear-month`` marks every
+sample for one instance in one calendar month as *meter-blind* (``present: []``, ``count: null``).
+It does not delete the lines. Blind is the honest record when attribution was broken -- we do not
+know who played, which is different from knowing nobody did -- and billing already skips blind
+samples and totals them separately, where deleting the lines would quietly assert an idle server.
+
+    sudo tools/ledger_admin.py --clear-month 2026-08 --instance enshrouded-primary --dry-run
 """
 
 from __future__ import annotations
@@ -41,13 +49,45 @@ def remove_login(lines: list[str], login: str) -> tuple[list[str], int]:
     return out, changed
 
 
+def clear_month(lines: list[str], month: str, instance: str) -> tuple[list[str], int]:
+    """Return (rewritten lines, samples changed) with one instance-month marked meter-blind.
+
+    ``month`` is ``YYYY-MM``, matched against the ``ts`` prefix, so it is UTC calendar month --
+    the same basis billing uses to scope a report.
+    """
+    out: list[str] = []
+    changed = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        record = json.loads(stripped)
+        if (record.get("instance") == instance
+                and isinstance(record.get("ts"), str)
+                and record["ts"].startswith(f"{month}-")
+                and not (record.get("present") == [] and record.get("count", 0) is None)):
+            record["present"] = []
+            record["count"] = None
+            changed += 1
+        out.append(json.dumps(record, separators=(",", ":"), sort_keys=True))
+    return out, changed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Corrective edits to the presence ledger.")
-    parser.add_argument("--remove-login", required=True, metavar="LOGIN",
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--remove-login", metavar="LOGIN",
                         help="strip this login from every sample's present list")
+    action.add_argument("--clear-month", metavar="YYYY-MM",
+                        help="mark every sample for --instance in this UTC month as meter-blind "
+                             "(present: [], count: null); requires --instance")
+    parser.add_argument("--instance", metavar="ID", help="instance id, e.g. enshrouded-primary")
     parser.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
     parser.add_argument("--dry-run", action="store_true", help="report what would change; write nothing")
     args = parser.parse_args()
+
+    if args.clear_month and not args.instance:
+        parser.error("--clear-month requires --instance (never clear every game at once)")
 
     try:
         text = args.ledger.read_text(encoding="utf-8")
@@ -55,8 +95,13 @@ def main() -> int:
         print(f"no ledger at {args.ledger}", file=sys.stderr)
         return 1
 
-    rewritten, changed = remove_login(text.splitlines(), args.remove_login)
-    print(f"{args.remove_login}: {changed} sample(s) affected out of {len(rewritten)}")
+    if args.clear_month:
+        rewritten, changed = clear_month(text.splitlines(), args.clear_month, args.instance)
+        print(f"{args.instance} {args.clear_month}: {changed} sample(s) marked meter-blind "
+              f"out of {len(rewritten)}")
+    else:
+        rewritten, changed = remove_login(text.splitlines(), args.remove_login)
+        print(f"{args.remove_login}: {changed} sample(s) affected out of {len(rewritten)}")
     if args.dry_run:
         print("dry run -- no changes written")
         return 0
