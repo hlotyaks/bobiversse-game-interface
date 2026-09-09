@@ -469,10 +469,17 @@ class GameLogIdentityTests(unittest.TestCase):
         from pathlib import Path
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "ids.json"
-            path.write_text(json.dumps({"identities": {"111": "alice@ex", "222": "", "333": 5}}))
+            path.write_text(json.dumps({"identities": {
+                "111": {"name": "Alice", "login": "alice@ex"},
+                "222": {"name": "Bob"},          # no login: billed, but no personal dashboard line
+                "333": "Cara",                   # bare string: name only, back-compatible
+                "444": {"login": "d@ex"},        # no name: unusable, must be dropped
+                "555": 5,
+            }}))
             loaded = METER.load_player_identities(path)
-        # Blank and non-string entries are dropped: an unmapped player must stay unnamed.
-        self.assertEqual(loaded, {"111": "alice@ex"})
+        self.assertEqual(loaded, {"111": {"name": "Alice", "login": "alice@ex"},
+                                  "222": {"name": "Bob", "login": ""},
+                                  "333": {"name": "Cara", "login": ""}})
 
     def test_missing_identity_map_is_empty_not_an_error(self) -> None:
         from pathlib import Path
@@ -493,10 +500,10 @@ class GameLogIdentityTests(unittest.TestCase):
                  unittest.mock.patch.object(METER, "instance_connected_players", return_value=["111", "999"]), \
                  unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
                 METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
-                                          identities={"111": "alice@ex"})
+                                          identities={"111": {"name": "Alice", "login": "alice@ex"}})
             rows = [json.loads(l) for l in ledger.read_text().splitlines()]
         primary = [r for r in rows if r["instance"] == "enshrouded-primary"][0]
-        self.assertEqual(primary["present"], ["alice@ex"])
+        self.assertEqual(primary["present"], ["Alice"])
         self.assertEqual(primary["count"], 2)
 
     def test_exclusions_still_apply_to_game_log_identity(self) -> None:
@@ -512,8 +519,9 @@ class GameLogIdentityTests(unittest.TestCase):
                  unittest.mock.patch.object(METER, "instance_connected_players", return_value=["111", "222"]), \
                  unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
                 METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
-                                          identities={"111": "alice@ex", "222": "admin@ex"},
-                                          template_exclusions={"enshrouded": frozenset({"admin@ex"})})
+                                          identities={"111": {"name": "Alice", "login": "alice@ex"},
+                                                      "222": {"name": "Admin", "login": "admin@ex"}},
+                                          template_exclusions={"enshrouded": frozenset({"Admin"})})
             rows = [json.loads(l) for l in ledger.read_text().splitlines()]
         primary = [r for r in rows if r["instance"] == "enshrouded-primary"][0]
-        self.assertEqual(primary["present"], ["alice@ex"])
+        self.assertEqual(primary["present"], ["Alice"])

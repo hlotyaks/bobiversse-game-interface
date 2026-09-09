@@ -158,6 +158,13 @@ def filter_billing_for_actor(report: dict[str, Any], actor: str, is_admin: bool)
     receive the full per-user breakdown and the aggregate totals (kitty, actual cost).
     """
     users = report.get("users") or {}
+    # Lines are keyed by in-game name; the viewer is known by their tailnet login. Match on the
+    # login the controller annotated, falling back to the key for a report that predates game-name
+    # identities (or a player whose name is their login).
+    mine = users.get(actor)
+    if mine is None:
+        mine = next((entry for entry in users.values()
+                     if isinstance(entry, dict) and entry.get("login") == actor), None)
     view: dict[str, Any] = {
         "instance": report.get("instance"),
         "month": report.get("month"),
@@ -166,7 +173,7 @@ def filter_billing_for_actor(report: dict[str, Any], actor: str, is_admin: bool)
         "run_cost_per_hour": report.get("run_cost_per_hour"),
         "viewer": actor,
         "is_admin": bool(is_admin),
-        "you": users.get(actor),
+        "you": mine,
     }
     if is_admin:
         view["users"] = users

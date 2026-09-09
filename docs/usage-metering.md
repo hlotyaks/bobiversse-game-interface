@@ -26,10 +26,23 @@ The meter splits the question into **how many** and **who**, and reads both from
   Replaying add/drop events over a window (`--identity-window`, default 24h) gives exactly who is
   connected. Peer handles are unique per session, so there is no reuse ambiguity.
 
-Steam IDs are translated to the tailnet login that billing and the dashboard key on, via the
-admin-maintained `/var/lib/game-server-interface/player-identities.json`
-(`{"identities": {steamid: login}}`), re-read every cycle so an edit applies within a minute with
-**no restart**. A player whose ID is not in that map is still counted by the game but is not named:
+Steam IDs are translated via the admin-maintained
+`/var/lib/game-server-interface/player-identities.json`, re-read every cycle so an edit applies
+within a minute with **no restart**:
+
+```json
+"identities": {
+  "76561190000000001": {"name": "SomeCharacter", "login": "cbrinton@gmail.com"},
+  "76561190000000002": {"name": "OtherCharacter", "login": ""}
+}
+```
+
+**`name` is the billing identity** — the in-game name the group knows each other by, and what
+appears on the bill. **`login`** is that person's tailnet login, carried only so the dashboard can
+tell which line belongs to the viewer: it identifies people from the `Tailscale-User-Login` header,
+so without this it cannot match a line keyed by game name. It is optional — a player with no login
+is billed normally but sees no personal line on the Billing page. (A bare string value is accepted
+as a name with no login.) A player whose ID is not in that map is still counted by the game but is not named:
 their share is reported as **UNATTRIBUTED** rather than guessed at. List what needs mapping with:
 
     sudo /usr/local/sbin/gsi-diagnose identities
@@ -214,6 +227,8 @@ current month "to date" plus any past months present in the ledger). Data flows
 UI`, keyed to the viewer's Tailscale login:
 
 - **Every player** sees only their own line — hours, solo/group split, and their dry-run share.
+  The viewer is matched to their line through the `login` field of the identity map, since lines are
+  keyed by in-game name; a player with no login mapped sees no personal line.
 - **Administrators** (the `is_game_administrator` gate: `TRUSTED_ACTOR_HEADER=1` and the login in
   `GAME_INTERFACE_ADMIN_LOGINS`) additionally see the full per-user table and the aggregate
   totals (server-up hours, actual cost, charged, kitty). Non-admins never receive other players'

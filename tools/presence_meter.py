@@ -361,14 +361,19 @@ def instance_connected_players(template_id: str, container: str, docker_bin: str
     return reader(logs) if logs else None
 
 
-def load_player_identities(path: Path) -> dict[str, str]:
-    """Load the admin-managed in-game-ID -> tailnet-login map ({"identities": {steamid: login}}).
+def load_player_identities(path: Path) -> dict[str, dict[str, str]]:
+    """Load the admin-managed player map: ``{"identities": {game_id: {"name", "login"}}}``.
 
-    Billing keys on the Tailscale login, the same identity the dashboard shows, so the game's Steam
-    ID has to be translated. A missing or malformed file yields no mapping, which leaves every
-    player unattributed rather than guessing -- the count still comes from the game, so the bill
-    reports the gap instead of silently charging the wrong person. Read fresh each cycle so an
-    admin's edit applies on the next sample with no restart.
+    ``name`` is the billing identity -- the in-game name the group knows each other by, which is
+    what appears on the bill. ``login`` is that person's tailnet login, carried only so the
+    dashboard can tell which line belongs to the viewer (it identifies people by the
+    ``Tailscale-User-Login`` header); it is optional, and a player without one is billed normally
+    but cannot be shown their own line.
+
+    A value may also be a bare string, taken as the name with no login. A missing or malformed file
+    yields no mapping, which leaves every player unattributed rather than guessed -- the count still
+    comes from the game, so the bill reports the gap instead of charging the wrong person. Read
+    fresh each cycle so an admin's edit applies on the next sample with no restart.
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -377,7 +382,18 @@ def load_player_identities(path: Path) -> dict[str, str]:
     mapping = raw.get("identities") if isinstance(raw, dict) else None
     if not isinstance(mapping, dict):
         return {}
-    return {str(k): v for k, v in mapping.items() if isinstance(v, str) and v}
+    result: dict[str, dict[str, str]] = {}
+    for game_id, value in mapping.items():
+        if isinstance(value, str):
+            name, login = value, ""
+        elif isinstance(value, dict):
+            name = value.get("name") if isinstance(value.get("name"), str) else ""
+            login = value.get("login") if isinstance(value.get("login"), str) else ""
+        else:
+            continue
+        if name:
+            result[str(game_id)] = {"name": name, "login": login}
+    return result
 
 
 def read_container_logs(container: str, docker_bin: str, since: str = "120s") -> str:
@@ -499,7 +515,7 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
                         # logins; an unmapped ID stays unnamed, so the shortfall against the game's
                         # count reaches the bill as UNATTRIBUTED rather than being guessed at.
                         connected = instance_connected_players(template_id, f"game-{key}", docker_bin, identity_window)
-                        present = sorted({identities[pid] for pid in (connected or []) if pid in identities} - excluded)
+                        present = sorted({identities[pid]["name"] for pid in (connected or []) if pid in identities} - excluded)
                     elif attribution == "byte-rate":
                         ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
                         present = attribute_by_count(ranked_for_instance, count, floor_kbps)
@@ -611,7 +627,8 @@ def main() -> int:
                              "excluded from attribution globally. Repeatable. For a per-game non-player "
                              "(admin of one game), use the admin-managed --exclusions-file instead.")
     parser.add_argument("--identities-file", type=Path, default=Path("/var/lib/game-server-interface/player-identities.json"),
-                        help="game-log attribution: map of in-game player ID (Steam ID) to tailnet "
+                        help="game-log attribution: map of in-game player ID (Steam ID) to the "
+                             "player's in-game name (the billing identity) and optional tailnet "
                              "login, re-read every cycle. An unmapped player is counted but not "
                              "named, so their share is reported as unattributed rather than guessed.")
     parser.add_argument("--identity-window", default=DEFAULT_IDENTITY_WINDOW, metavar="DURATION",

@@ -108,6 +108,7 @@ class Controller:
         audit_path: Path,
         presence_ledger: Path | None = None,
         billing_config: Path | None = None,
+        identities: Path | None = None,
         billing_module: Path | None = None,
     ) -> None:
         self.catalog_path = catalog_path
@@ -123,6 +124,7 @@ class Controller:
         # to this controller in the deployed layout, so default to a sibling module.
         self.presence_ledger = presence_ledger or Path("/var/lib/game-server-interface/presence.jsonl")
         self.billing_config_path = billing_config or Path("/etc/game-server-interface/billing.yaml")
+        self.identities_path = identities or Path("/var/lib/game-server-interface/player-identities.json")
         self.billing_module_path = billing_module or Path(__file__).with_name("billing.py")
         self._billing_module: Any = None
         self.lock = threading.RLock()
@@ -162,7 +164,34 @@ class Controller:
         if not isinstance(config, dict):
             raise ControllerError("billing config is invalid")
         instance_key = f"{template_id}-{instance_id}"
-        return billing.build_report(self.presence_ledger, config, instance_key, month)
+        report = billing.build_report(self.presence_ledger, config, instance_key, month)
+        # The ledger names players by their in-game name, which is what the group knows each other
+        # by and what belongs on a bill. The dashboard, though, recognises a viewer by their
+        # Tailscale login, so annotate each line with the login it belongs to; the interface uses it
+        # to decide which line is "yours". A player with no login mapped simply has none, and sees
+        # no personal line -- their billing is unaffected.
+        logins = self._identity_logins()
+        for name, entry in (report.get("users") or {}).items():
+            if isinstance(entry, dict) and name in logins:
+                entry["login"] = logins[name]
+        return report
+
+    def _identity_logins(self) -> dict[str, str]:
+        """Map in-game name -> tailnet login from the player identity file ({} if absent/invalid)."""
+        try:
+            payload = json.loads(self.identities_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+        mapping = payload.get("identities") if isinstance(payload, dict) else None
+        if not isinstance(mapping, dict):
+            return {}
+        logins: dict[str, str] = {}
+        for value in mapping.values():
+            if isinstance(value, dict):
+                name, login = value.get("name"), value.get("login")
+                if isinstance(name, str) and name and isinstance(login, str) and login:
+                    logins[name] = login
+        return logins
 
     def _read_exclusions(self) -> dict[str, list[str]]:
         """Load the raw per-template exclusion map ({template_id: [logins]}); {} if absent/invalid."""
