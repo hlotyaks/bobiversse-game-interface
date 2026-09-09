@@ -37,6 +37,10 @@ within a minute with **no restart**:
 }
 ```
 
+Steam IDs identify a person across *every* Steam game, so an entry written for one game already
+works for the next one — mapping a player is a one-time job, not a per-game one. An entry for
+someone who has never played is inert: the meter only ever looks up IDs the game actually reports.
+
 **`name` is the billing identity** — the in-game name the group knows each other by, and what
 appears on the bill. **`login`** is that person's tailnet login, carried only so the dashboard can
 tell which line belongs to the viewer: it identifies people from the `Tailscale-User-Login` header,
