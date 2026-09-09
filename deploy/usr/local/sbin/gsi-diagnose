@@ -102,26 +102,50 @@ OBS
 # this is the list to work through when a bill shows hours nobody was charged for.
 identities_report() {
   python3 - "$IDENTITIES" <<'IDS'
-import json, re, subprocess, sys
+import json, re, subprocess, sys, collections
+ADD  = re.compile(r"\[online\] Added peer (\S+) \(steamid:(\d+)\)")
+DROP = re.compile(r"\[online\] (?:Removed peer|Timeout for peer) (\S+)")
+# The game sends a character savegame during play. Attributed only when exactly one player is
+# connected, so the name is unambiguous -- it is the practical way to recognise who an ID belongs
+# to without asking everyone for their Steam profile.
+CHAR = re.compile(r"Sending Character Savegame '([^']+)'")
+
 try:
-    raw = json.load(open(sys.argv[1]))
-    mapping = raw.get("identities") or {}
+    mapping = (json.load(open(sys.argv[1])).get("identities") or {})
 except (FileNotFoundError, ValueError):
     mapping = {}
     print(f"no identity map yet: {sys.argv[1]}")
-seen = set()
+
 try:
-    logs = subprocess.run(["docker", "logs", "game-enshrouded-primary"],
-                          capture_output=True, text=True, timeout=120)
-    seen = set(re.findall(r"steamid:(\d+)", logs.stdout + logs.stderr))
+    logs = subprocess.run(["docker", "logs", "-t", "game-enshrouded-primary"],
+                          capture_output=True, text=True, timeout=180).stdout
 except Exception as exc:
-    print("could not read game log:", exc)
+    print("could not read game log:", exc); logs = ""
+
+live, chars, seen = {}, collections.defaultdict(collections.Counter), collections.defaultdict(list)
+for line in logs.splitlines():
+    stamp = line.split(" ", 1)[0][:19]
+    added = ADD.search(line)
+    if added:
+        live[added.group(1)] = added.group(2); seen[added.group(2)].append(stamp); continue
+    dropped = DROP.search(line)
+    if dropped:
+        live.pop(dropped.group(1), None); continue
+    character = CHAR.search(line)
+    if character and len(set(live.values())) == 1:
+        chars[next(iter(live.values()))][character.group(1)] += 1
+
 mapped = {k: v for k, v in mapping.items() if v}
 print(f"\n{len(seen)} player ID(s) seen in the game log, {len(mapped)} mapped to a login\n")
-for pid in sorted(seen):
+for pid in sorted(seen, key=lambda k: seen[k][-1], reverse=True):
     who = mapping.get(pid) or ""
-    print(f"  {pid}  {'-> ' + who if who else '** UNMAPPED -- playtime will be UNATTRIBUTED **'}")
-stale = sorted(set(mapping) - seen)
+    names = ", ".join(n for n, _ in chars[pid].most_common(3)) or "(never seen playing alone)"
+    print(f"  {pid}")
+    print(f"     login      : {who if who else '** UNMAPPED -- playtime lands as UNATTRIBUTED **'}")
+    print(f"     characters : {names}")
+    print(f"     sessions   : {len(seen[pid])}, last {seen[pid][-1]}")
+    print(f"     profile    : https://steamcommunity.com/profiles/{pid}")
+stale = sorted(set(mapping) - set(seen))
 if stale:
     print("\nmapped but never seen in the log (harmless):")
     for pid in stale:

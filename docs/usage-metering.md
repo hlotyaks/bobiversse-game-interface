@@ -34,6 +34,11 @@ their share is reported as **UNATTRIBUTED** rather than guessed at. List what ne
 
     sudo /usr/local/sbin/gsi-diagnose identities
 
+For each ID that report shows the mapped login (or that it is unmapped), the Steam profile URL,
+session count and last-seen time, and — usually the quickest way to recognise someone — the
+**character names** they played under. The game logs `Sending Character Savegame '<name>'`, which
+the report attributes only when exactly one player was connected, so the name is unambiguous.
+
 ### Why not the network layer
 
 Everything before 2026-09-09 tried to infer identity from network traffic, and all of it failed,
