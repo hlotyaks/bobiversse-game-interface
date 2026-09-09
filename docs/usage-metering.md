@@ -89,7 +89,8 @@ Two mechanisms, both applied after identity resolution so a game's slots go to a
 
 With game-log identity these matter far less than they did — attribution no longer mistakes an
 admin's SSH traffic for play — but they remain the way to say "this person runs the server and
-does not play this game".
+does not play this game". An exclusion matches either the player's tailnet login or their in-game
+name; the dashboard only accepts logins, so that is the usual form.
 
 Correcting a bad capture after the fact:
 `sudo /usr/local/libexec/game-server-interface/ledger_admin.py --remove-login <login>` (add

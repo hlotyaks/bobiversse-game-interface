@@ -506,6 +506,29 @@ class GameLogIdentityTests(unittest.TestCase):
         self.assertEqual(primary["present"], ["Alice"])
         self.assertEqual(primary["count"], 2)
 
+    def test_exclusion_by_login_still_works_against_game_names(self) -> None:
+        # The dashboard's Exclusions page only accepts tailnet logins, so excluding by login must
+        # drop the matching player even though the ledger names them by their in-game name.
+        import tempfile, json, yaml
+        from pathlib import Path
+        catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "p.jsonl"
+            state = {"bytes": {}, "rate_ewma": {}, "t": 0.0}
+            with unittest.mock.patch.object(METER, "_run", return_value="{}"), \
+                 unittest.mock.patch.object(METER, "is_unit_active", return_value=True), \
+                 unittest.mock.patch.object(METER, "instance_client_count", return_value=2), \
+                 unittest.mock.patch.object(METER, "instance_connected_players", return_value=["111", "222"]), \
+                 unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
+                METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
+                                          identities={"111": {"name": "Alice", "login": "alice@ex"},
+                                                      "222": {"name": "Admin", "login": "admin@ex"}},
+                                          template_exclusions={"enshrouded": frozenset({"admin@ex"})})
+            rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+        primary = [r for r in rows if r["instance"] == "enshrouded-primary"][0]
+        self.assertEqual(primary["present"], ["Alice"])
+        self.assertEqual(primary["count"], 2)  # still counted, just not named
+
     def test_exclusions_still_apply_to_game_log_identity(self) -> None:
         import tempfile, json, yaml
         from pathlib import Path

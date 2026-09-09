@@ -515,7 +515,16 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
                         # logins; an unmapped ID stays unnamed, so the shortfall against the game's
                         # count reaches the bill as UNATTRIBUTED rather than being guessed at.
                         connected = instance_connected_players(template_id, f"game-{key}", docker_bin, identity_window)
-                        present = sorted({identities[pid]["name"] for pid in (connected or []) if pid in identities} - excluded)
+                        # Match exclusions against the login as well as the in-game name: the
+                        # dashboard's Exclusions page validates entries as tailnet logins (they must
+                        # contain an "@"), so a name-only comparison would never match anything an
+                        # administrator can actually enter there.
+                        present = sorted({
+                            identities[pid]["name"] for pid in (connected or [])
+                            if pid in identities
+                            and identities[pid]["name"] not in excluded
+                            and (not identities[pid]["login"] or identities[pid]["login"] not in excluded)
+                        })
                     elif attribution == "byte-rate":
                         ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
                         present = attribute_by_count(ranked_for_instance, count, floor_kbps)
