@@ -69,7 +69,36 @@ delivery.
 > **Superseded.** The final sentence is false as written -- see the 2026-08-27 correction above.
 > Tailnet traffic *is* conntrack-tracked; only the UDP-to-game-port case is still open.
 
-## What actually breaks attribution: byte counters are direct-path only (2026-08-27)
+## Settled (2026-09-09): players never touch the tailnet, and the game logs their identity
+
+A packet capture with a client connected and in the world ended the whole line of investigation:
+
+    # tcpdump -i tailscale0 -n 'udp port 15636 or udp port 15637'      (12s, client connected)
+    0 packets captured
+
+SSH traffic to `100.84.161.38:22` is plainly visible on the same interface in the same capture
+window, so this is not a capture problem. **The published game port receives no traffic at all.**
+
+Enshrouded uses Steam's relay network (SDR). The server makes an *outbound* connection to Steam and
+clients reach it through Steam's relays, so there is no inbound `client -> game-port` flow on any
+interface — not on `tailscale0`, not in conntrack, not anywhere. Every identity source tried here
+(conntrack flows, peer byte rate, peer `LastWrite`) was looking for traffic that does not exist.
+The game log confirms the mechanism directly:
+
+    [online] Server connected to Steam successfully
+    [online] Server SteamId: 90291470795212813
+    [online] Session accepted with peer (steamid:76561190000000005)
+
+**And that last line is the identity source.** Enshrouded logs a Steam ID for every connecting
+peer, plus matching `Removed peer` / `Timeout for peer` events. Replaying them yields exactly who
+is connected — validated against a full 2-week container log: 64 events, one live handle, matching
+the game's own occupancy count. This retires the premise the whole feature was built on ("game
+servers here do not log player identity"), which was simply never checked.
+
+Attribution now reads that log (`--attribution game-log`) and maps Steam ID to tailnet login via an
+admin-maintained file. The sections below are kept as a record of what was ruled out and why.
+
+## What breaks the tailnet heuristics: byte counters are direct-path only (2026-08-27)
 
 `tailscale status --json` populates `RxBytes`/`TxBytes` **only for peers with an established direct
 path**. A DERP-relayed peer reads `0` no matter how much game traffic it is exchanging. Measured on
@@ -96,7 +125,9 @@ was online at the time of measurement with a `LastWrite` 35 hours stale. So "the
 most recently" should name exactly the game's N connected clients, where "the N busiest peers by
 byte rate" structurally cannot.
 
-**Switched on 2026-08-27** as `--attribution last-write` (the meter's default). Enshrouded is a
+**Superseded on 2026-09-09** by `--attribution game-log` (see above): write-recency is also
+direct-path only, so it was blind to relayed peers in exactly the way byte rate was. It was briefly
+the default after being **switched on 2026-08-27**. Enshrouded is a
 test bed for the metering process rather than a live billing system, so the cost of adopting the
 better-supported signal immediately is nil, while leaving relayed players unnameable would have
 kept collecting data with a known hole in it. `--attribution byte-rate` restores the old ranking,

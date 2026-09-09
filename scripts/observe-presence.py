@@ -83,6 +83,8 @@ def main() -> int:
     parser.add_argument("--systemctl-bin", default="/usr/bin/systemctl")
     parser.add_argument("--docker-bin", default="/usr/bin/docker")
     parser.add_argument("--conntrack-bin", default="/usr/sbin/conntrack")
+    parser.add_argument("--identities-file", type=Path,
+                        default=Path("/var/lib/game-server-interface/player-identities.json"))
     parser.add_argument("--log-jsonl", type=Path, nargs="?", const=DEFAULT_LOG, default=None,
                         metavar="PATH",
                         help=f"append structured records to PATH (default {DEFAULT_LOG}) instead of "
@@ -112,7 +114,8 @@ def main() -> int:
         previous = state["bytes"]
         ewma = pm.update_rate_ewma(state["rate_ewma"], peers, previous, dt, pm.DEFAULT_RATE_SMOOTHING)
         ranked = pm.rank_by_smoothed_rate(ewma)
-        count = pm.instance_client_count(args.template, f"game-{args.instance}", args.docker_bin)
+        CONTAINER = f"game-{args.instance}"
+        count = pm.instance_client_count(args.template, CONTAINER, args.docker_bin)
         active = pm.is_unit_active(args.instance, args.systemctl_bin)
 
         try:
@@ -134,13 +137,18 @@ def main() -> int:
                               "last_write_s": (round(path["last_write_s"]) if path.get("last_write_s") is not None else None),
                               "last_handshake_s": (round(path["last_handshake_s"]) if path.get("last_handshake_s") is not None else None)})
 
-        # Production signal since 2026-08-27: write-recency, the only one populated for DERP peers.
-        would = [] if count is None else pm.attribute_by_write_recency(
-            paths, count, max_age_s=pm.DEFAULT_MAX_WRITE_AGE_S)
+        # Production signal since 2026-09-09: the identities the game logs for itself.
+        identities = pm.load_player_identities(args.identities_file)
+        game_players = pm.instance_connected_players(args.template, CONTAINER, args.docker_bin,
+                                                     pm.DEFAULT_IDENTITY_WINDOW) or []
+        unmapped = sorted(pid for pid in game_players if pid not in identities)
+        would = sorted({identities[pid] for pid in game_players if pid in identities})
         unnamed = (count - len(would)) if count is not None else None
-        # Shadow the superseded byte-rate ranking so regressions stay visible and the two signals
-        # can still be compared on real sessions. Recorded, never acted on.
+        # Shadow the superseded tailnet heuristics. Both are blind to Steam-relayed play, so they
+        # are expected to name nobody; keeping them recorded makes that plain rather than assumed.
         by_bytes = [] if count is None else pm.attribute_by_count(ranked, count, pm.DEFAULT_ATTRIBUTION_FLOOR_KBPS)
+        by_write = [] if count is None else pm.attribute_by_write_recency(
+            paths, count, max_age_s=pm.DEFAULT_MAX_WRITE_AGE_S)
 
         flows = conntrack_flows(args.port, args.conntrack_bin)
         ip_login: dict[str, str] = {}
@@ -165,6 +173,8 @@ def main() -> int:
                 reason = "occupancy_unknown"
             elif unnamed:
                 reason = "unnamed_players"
+            elif unmapped:
+                reason = "unmapped_players"
             elif count > 0:
                 reason = "players_connected"
             elif args.heartbeat > 0 and cycle % args.heartbeat == 0:
@@ -174,6 +184,8 @@ def main() -> int:
                     "ts": pm.now(), "instance": args.instance, "reason": reason,
                     "count": count, "attributed": would, "unnamed": unnamed,
                     "attributed_by_byte_rate": by_bytes,
+                    "attributed_by_last_write": by_write,
+                    "game_players": game_players, "unmapped_players": unmapped,
                     "unit_active": active, "dt": round(dt, 1),
                     "peers": peer_rows,
                     "conntrack": {"flows": len(flows), "logins": named},
@@ -196,8 +208,9 @@ def main() -> int:
             else:
                 short = f"   *** {unnamed} PLAYER(S) UNNAMED ***" if unnamed else ""
                 print(f"  -> meter records: count={count} present={would}{short}")
-                agree = "same" if by_bytes == would else "DIFFERS"
-                print(f"  -> byte-rate (old): count={count} present={by_bytes}   ({agree})")
+                print(f"  -> game log says:  players={game_players}"
+                      + (f"   UNMAPPED={unmapped}" if unmapped else ""))
+                print(f"  -> byte-rate (old): {by_bytes}    last-write (old): {by_write}")
             print(f"  conntrack udp dport {args.port}: {len(flows)} flow(s) -> {named if named else 'none'}")
             for line in flows[:6]:
                 print(f"      {line}")

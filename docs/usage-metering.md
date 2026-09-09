@@ -13,77 +13,82 @@ This is the first of two stages toward the cost-sharing feature described in
 
 ## How players are identified
 
-Enshrouded does not log player identity — its stdout only reports an anonymous connected-machine
-count — so identity comes from the network layer. The meter has two interchangeable sources:
+The meter splits the question into **how many** and **who**, and reads both from the game itself.
 
-- **`tailscale` (default).** Players reach the game over the tailnet. A 2026-07-18 test found no
-  `client → game-port` flow in conntrack and concluded the tunnel hid it; that conclusion was
-  **over-generalised and is now partly retracted** — tailnet traffic *is* conntrack-tracked, and
-  whether the game's UDP flows appear is an open question with a live re-test pending (see
-  [presence-source-conntrack-findings.md](presence-source-conntrack-findings.md)). The meter splits
-  the question into **how many** and **who**:
-  - **How many** connected clients there are comes from the *game itself*. Enshrouded logs a
-    per-machine block every ~30s (`m#N(...) … OperatingNormally`, the server's own entry excluded);
-    the meter reads it via `docker logs`. This is authoritative and needs no tuning.
-  - **Who** they are comes from `tailscale status --json`: the reported client count is attributed
-    to the peers the local engine wrote to most recently (`LastWrite`). Identity is the Tailscale
-    login, the same one the dashboard uses, so there is **no separate login system**.
+- **How many** connected clients there are comes from Enshrouded's per-machine `Session` block,
+  logged every ~30s (`m#N(...) … OperatingNormally`, the server's own entry excluded), read via
+  `docker logs`. Authoritative, needs no tuning.
+- **Who** they are comes from the game's `[online]` events, which name every peer:
 
-    Write-recency replaced traffic-rate ranking on 2026-08-27. `RxBytes`/`TxBytes` are populated
-    **only for peers with a direct path** — a DERP-relayed peer reads `0` however much game traffic
-    it is exchanging — so byte-rate ranking could not see a relayed player at all. `LastWrite` is
-    populated for every peer and is not refreshed by mere presence (an online but idle peer measured
-    35 hours stale while a player read 0s). A peer not written to within `--max-write-age` seconds
-    (default 120, two cycles) is never selected. `--attribution byte-rate` restores the old ranking.
+      [online] Added peer 0(23) (steamid:76561190000000005)
+      [online] Removed peer 0(23)          /   [online] Timeout for peer 0(23)
 
-  This replaced an earlier "peer is `Active` and above `--min-kbps`" heuristic that silently
-  undercounted: real per-client Enshrouded traffic (~single-digit kbps) sits far below any usable
-  bandwidth threshold, so genuine players were dropped while a host with ambient non-game tailnet
-  traffic leaked through. The game's own count is the reliable player/idle discriminator. Games
-  **without** an occupancy reader still fall back to the `--min-kbps` traffic-rate heuristic.
-  Presence is attributed only to instances whose systemd unit is active.
-- **`conntrack`.** Watches `conntrack -L` for direct `client → game-port` flows, naming each client
-  exactly rather than ranking by bandwidth. Believed blind under Tailscale (above) — a belief now
-  under re-test — and the right source for a future cloud/public-IP deployment without the
-  WireGuard tunnel. Preserved and tested; switch with `--source conntrack`.
+  Replaying add/drop events over a window (`--identity-window`, default 24h) gives exactly who is
+  connected. Peer handles are unique per session, so there is no reuse ambiguity.
 
-Attribution assumes the game's connected clients are the busiest tailnet peers. Two mechanisms keep
-that honest:
+Steam IDs are translated to the tailnet login that billing and the dashboard key on, via the
+admin-maintained `/var/lib/game-server-interface/player-identities.json`
+(`{"identities": {steamid: login}}`), re-read every cycle so an edit applies within a minute with
+**no restart**. A player whose ID is not in that map is still counted by the game but is not named:
+their share is reported as **UNATTRIBUTED** rather than guessed at. List what needs mapping with:
 
-- **Smoothing.** Per-peer traffic rates are EWMA-smoothed. This mattered when byte rate drove
-  attribution; it is now only used by the `--min-kbps` fallback for games with no occupancy reader,
-  and by the observer's shadow comparison.
-- **Exclusions.** Some tailnet peers are *never* players — a server admin or dashboard-only user
-  whose HTTPS/SSH traffic to the host is indistinguishable by volume from game traffic. There are
-  two ways to exclude them, both applied before attribution so a game's slots go to actual players:
-  - **Per-game (preferred), admin-managed at runtime.** An administrator edits the exclusion list
-    for each game on the dashboard's **Exclusions** page (a login excluded from Enshrouded can still
-    be metered as a player of other games). This writes the controller-managed
-    `/var/lib/game-server-interface/presence-exclusions.json` (`{template_id: [logins]}`); the meter
-    re-reads it every cycle, so a change takes effect within a minute with **no restart**. Seeded on
-    install with `enshrouded → hlotyaks@github` (the non-playing admin); the installer never
-    overwrites the live file. Under the hood: interface `GET`/`POST /api/exclusions` (admin-gated) →
-    controller `list_exclusions` / `set_exclusions` (validated, atomic, audited).
-  - **Global.** `--exclude-login <login>` (repeatable) in the meter's unit drops a login from *every*
-    game — use it only for an account that is never a player of anything (e.g. a monitoring bot).
+    sudo /usr/local/sbin/gsi-diagnose identities
 
-Correcting a bad capture after the fact (e.g. a mis-attributed login from before an exclusion was
-added): `sudo /usr/local/libexec/game-server-interface/ledger_admin.py --remove-login <login>`
-(add `--dry-run` first). It strips the login from every sample's `present` list, keeping emptied
-samples as `present: []`, atomically and at mode `0600`.
+### Why not the network layer
 
-Other known limits of the default source (fine for a dry-run Stage 1): a one-cycle startup lag (the
-identity rate needs two samples); a non-player peer generating *sustained* heavy game-like traffic
-that isn't on the exclusion list could still be mis-ranked; and if two games run at once a player's
-traffic counts toward each running instance (it can't be split between them). Adding an occupancy
-reader for another game is a small function keyed by template in
-[tools/presence_meter.py](../tools/presence_meter.py) (`OCCUPANCY_READERS`).
+Everything before 2026-09-09 tried to infer identity from network traffic, and all of it failed,
+because **players never touch the tailnet to play**. Enshrouded uses Steam's relay network: the
+server connects *outbound* to Steam and clients arrive through Steam's relays. A packet capture on
+`tailscale0` with a client connected and in the world caught **zero** packets on the game port,
+while SSH to the same host was plainly visible in the same window.
+
+So there was never a `client → game-port` flow to see — not in conntrack, not on the wire. Three
+successive heuristics chased it anyway:
+
+| Signal | Why it failed |
+| --- | --- |
+| `conntrack` flows to the game port | No such flow exists; traffic goes via Steam relays |
+| Peer byte rate (`RxBytes`/`TxBytes`) | Populated only for peers with a **direct** path; DERP-relayed peers read 0 |
+| Peer `LastWrite` | Same direct-path-only limitation |
+
+The two tailnet heuristics are preserved as `--attribution byte-rate` and `--attribution last-write`
+for a future deployment where players *do* connect over the tailnet, and the observer shadow-logs
+both. Full history in
+[presence-source-conntrack-findings.md](presence-source-conntrack-findings.md).
+
+### Exclusions
+
+Some logins are never players of a given game — an admin who runs the server but does not play it.
+Two mechanisms, both applied after identity resolution so a game's slots go to actual players:
+
+- **Per-game (preferred), admin-managed at runtime.** An administrator edits the exclusion list for
+  each game on the dashboard's **Exclusions** page. This writes the controller-managed
+  `/var/lib/game-server-interface/presence-exclusions.json` (`{template_id: [logins]}`); the meter
+  re-reads it every cycle, so a change takes effect within a minute with **no restart**. Under the
+  hood: interface `GET`/`POST /api/exclusions` (admin-gated) → controller `list_exclusions` /
+  `set_exclusions` (validated, atomic, audited).
+- **Global.** `--exclude-login <login>` (repeatable) drops a login from *every* game.
+
+With game-log identity these matter far less than they did — attribution no longer mistakes an
+admin's SSH traffic for play — but they remain the way to say "this person runs the server and
+does not play this game".
+
+Correcting a bad capture after the fact:
+`sudo /usr/local/libexec/game-server-interface/ledger_admin.py --remove-login <login>` (add
+`--dry-run` first), or `--clear-month YYYY-MM --instance <id>` to retire a month whose capture is
+not trustworthy.
+
+Adding a new game means writing two small functions keyed by template in
+[tools/presence_meter.py](../tools/presence_meter.py): an `OCCUPANCY_READERS` entry for the count
+and an `IDENTITY_READERS` entry for the identities. Games that log neither fall back to the
+`--min-kbps` tailnet heuristic, with all the caveats above.
 
 ## Components
 
 | Piece | File | Role |
 | --- | --- | --- |
-| Presence meter | [tools/presence_meter.py](../tools/presence_meter.py) | Root systemd service. Each cycle reads the game's client count and `tailscale status --json`, attributes that count to the busiest tailnet peers of active game units, and appends an occupancy sample to the ledger. (`--source conntrack` swaps in the direct-flow source for non-Tailscale deployments.) |
+| Presence meter | [tools/presence_meter.py](../tools/presence_meter.py) | Root systemd service. Each cycle reads the game's own client count and connected-player identities from its log, maps them to tailnet logins, and appends an occupancy sample to the ledger. |
+| Player identity map | `/var/lib/game-server-interface/player-identities.json` | Admin-maintained `{in-game ID: tailnet login}`. Root-owned `0600`. Unmapped players are counted but not named. |
 | Live observer | [scripts/observe-presence.py](../scripts/observe-presence.py) | Read-only. Run as root during a real session to watch the count, every peer's byte deltas/EWMA, what the meter would attribute, and the conntrack flows side by side. The tool for diagnosing a *who* failure. |
 | Presence ledger | `/var/lib/game-server-interface/presence.jsonl` | Append-only JSONL, one line per instance per cycle: `{"ts","instance","present":[logins],"count":N}`. `count` is the game's own client count and `present` is only who the meter could name, so `count >= len(present)`; `"count": null` means the occupancy read failed (unknown, *not* nobody). Root-owned, `0600` — it is playtime metadata (who played when); treat it as private, like the audit log. |
 | Billing config | [deploy/etc/game-server-interface/billing.yaml](../deploy/etc/game-server-interface/billing.yaml) | Nominal per-instance run-cost and the group-size multiplier schedule `m(n)`. No secrets. |
@@ -94,11 +99,9 @@ reader for another game is a small function keyed by template in
 The meter answers two questions per cycle and they fail independently:
 
 - **How many** — the game's own count. Reliable.
-- **Who** — write-recency over tailnet peers. **This is the weak half**: it failed three times as
-  bandwidth ranking (the original `--min-kbps` undercount, the transient-burst misattribution EWMA
-  smoothing addressed, and the 2026-08 blackout below, whose root cause was that byte counters are
-  direct-path only). Write-recency addresses the known cause; it is still a heuristic, and the
-  observer shadow-logs the old signal so a regression stays visible.
+- **Who** — the identities the game logs for itself. Exact, and from the same source as the count.
+  This was the weak half for two months, through three failed network heuristics, because nobody
+  checked whether the game named its players. It does.
 
 The ledger therefore records **both** numbers. When the game says three clients and the meter can
 only name one, that is written down as `{"present": ["a@ex"], "count": 3}` and the bill charges the

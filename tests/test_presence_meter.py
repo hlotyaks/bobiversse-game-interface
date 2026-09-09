@@ -199,6 +199,7 @@ class ExcludeLoginTests(unittest.TestCase):
                  unittest.mock.patch.object(METER, "instance_client_count", return_value=1), \
                  unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
                 METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
+                                          attribution="last-write",
                                           exclude_logins=frozenset({"hlotyaks@github"}))
             rows = [json.loads(l) for l in ledger.read_text().splitlines()]
         primary = [r for r in rows if r["instance"] == "enshrouded-primary"]
@@ -248,6 +249,7 @@ class PerGameExclusionTests(unittest.TestCase):
                  unittest.mock.patch.object(METER, "instance_client_count", return_value=1), \
                  unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
                 METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
+                                          attribution="last-write",
                                           template_exclusions={"enshrouded": frozenset({"hlotyaks@github"})})
             rows = [json.loads(l) for l in ledger.read_text().splitlines()]
         primary = [r for r in rows if r["instance"] == "enshrouded-primary"]
@@ -303,7 +305,8 @@ class OccupancyUnknownTests(unittest.TestCase):
                  unittest.mock.patch.object(METER, "is_unit_active", return_value=True), \
                  unittest.mock.patch.object(METER, "instance_client_count", return_value=count), \
                  unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
-                METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0)
+                METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
+                                          attribution="last-write")
             rows = [json.loads(l) for l in ledger.read_text().splitlines()]
         return [r for r in rows if r["instance"] == "enshrouded-primary"][0]
 
@@ -350,24 +353,26 @@ class WriteRecencyAttributionTests(unittest.TestCase):
     session while the game logged three connected clients for 2.3h.
     """
 
-    NOW = "2026-08-27T14:00:00Z"
-
     def _status(self, peers):
-        """peers: [(login, last_write_iso, curaddr)] -> a tailscale status --json shape."""
+        """peers: [(login, seconds_since_last_write, curaddr)] -> a tailscale status --json shape.
+
+        Ages are relative to now, never literal timestamps: attribution compares LastWrite against
+        the clock, so hardcoded dates silently stop meaning "recent" as soon as time passes.
+        """
         users = {str(i): {"LoginName": login} for i, (login, _, _) in enumerate(peers)}
         nodes = {}
-        for i, (_, last_write, curaddr) in enumerate(peers):
-            nodes[f"n{i}"] = {"UserID": i, "LastWrite": last_write, "CurAddr": curaddr,
+        for i, (_, age_s, curaddr) in enumerate(peers):
+            nodes[f"n{i}"] = {"UserID": i, "LastWrite": recent(age_s), "CurAddr": curaddr,
                               "Online": True, "Relay": "nyc", "RxBytes": 0, "TxBytes": 0}
         return {"User": users, "Peer": nodes}
 
     def test_relayed_players_are_visible_where_byte_rate_saw_nothing(self) -> None:
         # Three connected clients, all DERP-relayed, all with zero byte counters.
         status = self._status([
-            ("alice@ex", "2026-08-27T13:59:59.9Z", ""),
-            ("bob@ex", "2026-08-27T13:59:59.8Z", ""),
-            ("cara@ex", "2026-08-27T13:59:59.7Z", ""),
-            ("lurker@ex", "2026-08-26T00:00:00Z", ""),
+            ("alice@ex", 1, ""),
+            ("bob@ex", 2, ""),
+            ("cara@ex", 3, ""),
+            ("lurker@ex", 90_000, ""),
         ])
         paths = METER.parse_peer_paths(status)
         named = METER.attribute_by_write_recency(paths, count=3, max_age_s=120.0)
@@ -381,14 +386,14 @@ class WriteRecencyAttributionTests(unittest.TestCase):
     def test_a_stale_peer_is_never_selected(self) -> None:
         # Game says two, but only one peer has been written to recently -- under-report, never
         # reach back in time for a second name.
-        status = self._status([("alice@ex", "2026-08-27T13:59:59Z", ""),
-                               ("lurker@ex", "2026-08-27T13:00:00Z", "")])
+        status = self._status([("alice@ex", 1, ""), ("lurker@ex", 3600, "")])
         paths = METER.parse_peer_paths(status)
         self.assertEqual(METER.attribute_by_write_recency(paths, 2, max_age_s=120.0), ["alice@ex"])
 
     def test_never_written_peer_is_skipped(self) -> None:
-        status = self._status([("alice@ex", "2026-08-27T13:59:59Z", ""),
-                               ("fresh@ex", "0001-01-01T00:00:00Z", "")])
+        status = self._status([("alice@ex", 1, "")])
+        status["User"]["9"] = {"LoginName": "fresh@ex"}
+        status["Peer"]["n9"] = {"UserID": 9, "LastWrite": "0001-01-01T00:00:00Z", "CurAddr": ""}
         paths = METER.parse_peer_paths(status)
         self.assertIsNone(paths["fresh@ex"]["last_write_s"])
         self.assertEqual(METER.attribute_by_write_recency(paths, 2, max_age_s=120.0), ["alice@ex"])
@@ -396,8 +401,7 @@ class WriteRecencyAttributionTests(unittest.TestCase):
     def test_exclusions_pass_the_slot_to_the_next_real_player(self) -> None:
         # The admin is written to most recently (dashboard traffic) but is excluded from this game,
         # so the single slot must fall through to the player rather than be spent on them.
-        status = self._status([("admin@ex", "2026-08-27T13:59:59.99Z", "1.2.3.4:41641"),
-                               ("player@ex", "2026-08-27T13:59:59.5Z", "")])
+        status = self._status([("admin@ex", 1, "1.2.3.4:41641"), ("player@ex", 2, "")])
         paths = METER.parse_peer_paths(status)
         named = METER.attribute_by_write_recency(paths, 1, max_age_s=120.0,
                                                  excluded=frozenset({"admin@ex"}))
@@ -405,14 +409,111 @@ class WriteRecencyAttributionTests(unittest.TestCase):
 
     def test_devices_collapse_to_the_most_recently_written(self) -> None:
         status = {"User": {"1": {"LoginName": "alice@ex"}},
-                  "Peer": {"old": {"UserID": 1, "LastWrite": "2026-08-01T00:00:00Z", "CurAddr": ""},
-                           "new": {"UserID": 1, "LastWrite": "2026-08-27T13:59:59Z", "CurAddr": "1.2.3.4:1"}}}
+                  "Peer": {"old": {"UserID": 1, "LastWrite": recent(90_000), "CurAddr": ""},
+                           "new": {"UserID": 1, "LastWrite": recent(1), "CurAddr": "1.2.3.4:1"}}}
         paths = METER.parse_peer_paths(status)
         self.assertEqual(len(paths), 1)
         self.assertLess(paths["alice@ex"]["last_write_s"], 120.0)
         self.assertTrue(paths["alice@ex"]["direct"])
 
     def test_zero_count_names_nobody(self) -> None:
-        status = self._status([("alice@ex", "2026-08-27T13:59:59Z", "")])
+        status = self._status([("alice@ex", 1, "")])
         paths = METER.parse_peer_paths(status)
         self.assertEqual(METER.attribute_by_write_recency(paths, 0, max_age_s=120.0), [])
+
+
+class GameLogIdentityTests(unittest.TestCase):
+    """Identity from the game's own log -- the source every network heuristic was standing in for.
+
+    Enshrouded logs a Steam ID per connected peer. The premise the earlier design rested on ("the
+    server does not log player identity") was wrong, and no network source could have worked anyway:
+    players reach the server over Steam's relay network, so the published UDP port sees no traffic.
+    """
+
+    LOG = "\n".join([
+        "[I 385:29:18,005] [online] Session accepted with peer (steamid:111)",
+        "[I 385:29:18,005] [online] Added peer 0(23) (steamid:111)",
+        "[E 385:29:18,405] [online] Begin auth session with peer 0(23)",
+        "[I 385:29:19,698] [online] Client '111' authenticated by steam",
+        "[I 385:40:00,000] [online] Added peer 0(24) (steamid:222)",
+        "[I 385:50:00,000] [online] Added peer 1(3) (steamid:333)",
+        "[I 386:31:52,952] [online] Disconnecting peer 0(23)",
+        "[I 386:31:52,952] [online] Removed peer 0(23)",
+        "[I 386:40:00,000] [online] Timeout for peer 1(3)",
+    ])
+
+    def test_replays_add_and_drop_to_who_is_connected_now(self) -> None:
+        self.assertEqual(METER.enshrouded_connected_players(self.LOG), ["222"])
+
+    def test_timeout_drops_a_peer_like_removal(self) -> None:
+        self.assertNotIn("333", METER.enshrouded_connected_players(self.LOG))
+
+    def test_empty_log_names_nobody(self) -> None:
+        self.assertEqual(METER.enshrouded_connected_players(""), [])
+
+    def test_the_same_player_reconnecting_is_counted_once(self) -> None:
+        log = "\n".join([
+            "[online] Added peer 0(1) (steamid:111)",
+            "[online] Removed peer 0(1)",
+            "[online] Added peer 0(2) (steamid:111)",
+        ])
+        self.assertEqual(METER.enshrouded_connected_players(log), ["111"])
+
+    def test_two_devices_of_one_player_collapse(self) -> None:
+        log = "\n".join(["[online] Added peer 0(1) (steamid:111)",
+                         "[online] Added peer 0(2) (steamid:111)"])
+        self.assertEqual(METER.enshrouded_connected_players(log), ["111"])
+
+    def test_identity_map_loading(self) -> None:
+        import tempfile, json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "ids.json"
+            path.write_text(json.dumps({"identities": {"111": "alice@ex", "222": "", "333": 5}}))
+            loaded = METER.load_player_identities(path)
+        # Blank and non-string entries are dropped: an unmapped player must stay unnamed.
+        self.assertEqual(loaded, {"111": "alice@ex"})
+
+    def test_missing_identity_map_is_empty_not_an_error(self) -> None:
+        from pathlib import Path
+        self.assertEqual(METER.load_player_identities(Path("/nonexistent/ids.json")), {})
+
+    def test_unmapped_player_is_counted_but_not_named(self) -> None:
+        # The game says two connected; only one Steam ID is mapped. The named one is billed at the
+        # group rate for two, and the other surfaces as UNATTRIBUTED rather than being guessed.
+        import tempfile, json, yaml
+        from pathlib import Path
+        catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "p.jsonl"
+            state = {"bytes": {}, "rate_ewma": {}, "t": 0.0}
+            with unittest.mock.patch.object(METER, "_run", return_value="{}"), \
+                 unittest.mock.patch.object(METER, "is_unit_active", return_value=True), \
+                 unittest.mock.patch.object(METER, "instance_client_count", return_value=2), \
+                 unittest.mock.patch.object(METER, "instance_connected_players", return_value=["111", "999"]), \
+                 unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
+                METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
+                                          identities={"111": "alice@ex"})
+            rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+        primary = [r for r in rows if r["instance"] == "enshrouded-primary"][0]
+        self.assertEqual(primary["present"], ["alice@ex"])
+        self.assertEqual(primary["count"], 2)
+
+    def test_exclusions_still_apply_to_game_log_identity(self) -> None:
+        import tempfile, json, yaml
+        from pathlib import Path
+        catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "p.jsonl"
+            state = {"bytes": {}, "rate_ewma": {}, "t": 0.0}
+            with unittest.mock.patch.object(METER, "_run", return_value="{}"), \
+                 unittest.mock.patch.object(METER, "is_unit_active", return_value=True), \
+                 unittest.mock.patch.object(METER, "instance_client_count", return_value=2), \
+                 unittest.mock.patch.object(METER, "instance_connected_players", return_value=["111", "222"]), \
+                 unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
+                METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0,
+                                          identities={"111": "alice@ex", "222": "admin@ex"},
+                                          template_exclusions={"enshrouded": frozenset({"admin@ex"})})
+            rows = [json.loads(l) for l in ledger.read_text().splitlines()]
+        primary = [r for r in rows if r["instance"] == "enshrouded-primary"][0]
+        self.assertEqual(primary["present"], ["alice@ex"])

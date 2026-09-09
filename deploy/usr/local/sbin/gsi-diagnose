@@ -9,13 +9,14 @@
 set -euo pipefail
 
 LEDGER=/var/lib/game-server-interface/presence.jsonl
+IDENTITIES=/var/lib/game-server-interface/player-identities.json
 OBSERVER=/var/lib/game-server-interface/presence-observer.jsonl
 BILLING=/usr/local/libexec/game-server-interface/billing.py
 UNIT=game-presence-meter.service
 INSTANCE_RE='^[a-z0-9-]+$'
 
 usage() {
-  echo "usage: gsi-diagnose {ledger|bill|meter-log|observer|all} [instance-id]" >&2
+  echo "usage: gsi-diagnose {ledger|bill|meter-log|observer|identities|all} [instance-id]" >&2
   echo "  read-only. instance-id defaults to enshrouded-primary." >&2
   exit 2
 }
@@ -96,15 +97,50 @@ for r in interesting[-25:]:
 OBS
 }
 
+# Which in-game player IDs the game has seen, and which still have no tailnet login mapped. An
+# unmapped player is counted but never named, so their playtime lands on the bill as UNATTRIBUTED --
+# this is the list to work through when a bill shows hours nobody was charged for.
+identities_report() {
+  python3 - "$IDENTITIES" <<'IDS'
+import json, re, subprocess, sys
+try:
+    raw = json.load(open(sys.argv[1]))
+    mapping = raw.get("identities") or {}
+except (FileNotFoundError, ValueError):
+    mapping = {}
+    print(f"no identity map yet: {sys.argv[1]}")
+seen = set()
+try:
+    logs = subprocess.run(["docker", "logs", "game-enshrouded-primary"],
+                          capture_output=True, text=True, timeout=120)
+    seen = set(re.findall(r"steamid:(\d+)", logs.stdout + logs.stderr))
+except Exception as exc:
+    print("could not read game log:", exc)
+mapped = {k: v for k, v in mapping.items() if v}
+print(f"\n{len(seen)} player ID(s) seen in the game log, {len(mapped)} mapped to a login\n")
+for pid in sorted(seen):
+    who = mapping.get(pid) or ""
+    print(f"  {pid}  {'-> ' + who if who else '** UNMAPPED -- playtime will be UNATTRIBUTED **'}")
+stale = sorted(set(mapping) - seen)
+if stale:
+    print("\nmapped but never seen in the log (harmless):")
+    for pid in stale:
+        print(f"  {pid} -> {mapping[pid] or '(blank)'}")
+print(f"\nedit: sudo nano {sys.argv[1]}   (re-read every cycle; no restart needed)")
+IDS
+}
+
 case "$sub" in
   ledger)    ledger_stats ;;
   observer)  observer_tail ;;
+  identities) identities_report ;;
   bill)      "$BILLING" --instance "$inst" ;;
   meter-log) journalctl -u "$UNIT" --no-pager -n 120 ;;
   all)
     echo "########## presence ledger ##########"; ledger_stats
     echo; echo "########## billing ($inst) ##########"; "$BILLING" --instance "$inst" || true
     echo; echo "########## meter journal (tail) ##########"; journalctl -u "$UNIT" --no-pager -n 40
-    echo; echo "########## attribution observer ##########"; observer_tail || true ;;
+    echo; echo "########## attribution observer ##########"; observer_tail || true
+    echo; echo "########## player identities ##########"; identities_report || true ;;
   *) usage ;;
 esac

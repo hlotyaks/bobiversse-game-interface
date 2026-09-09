@@ -36,6 +36,14 @@ fi
 # never overwrite the live copy: after install it is owned by the controller and edited by admins via
 # the interface. The controller (running as root) rewrites it atomically; the meter re-reads it each
 # cycle. Root-owned and 0600 like the ledger -- it is playtime/config metadata, not world data.
+# Player identity map (in-game ID -> tailnet login). Seeded with the IDs seen so far and blank
+# logins for an admin to fill in; never overwrite a live copy, which holds real mappings.
+if [[ ! -e /var/lib/game-server-interface/player-identities.json ]]; then
+  install -o root -g root -m 0600 "${repo_root}/deploy/var/lib/game-server-interface/player-identities.json" /var/lib/game-server-interface/player-identities.json
+else
+  echo "keeping existing /var/lib/game-server-interface/player-identities.json"
+fi
+
 if [[ ! -e /var/lib/game-server-interface/presence-exclusions.json ]]; then
   install -o root -g root -m 0600 "${repo_root}/deploy/var/lib/game-server-interface/presence-exclusions.json" /var/lib/game-server-interface/presence-exclusions.json
 else
