@@ -121,3 +121,48 @@ class DeployTriggerCoverageTests(unittest.TestCase):
         bootstrap = {"install-phase2.sh", "install-autodeploy.sh"}
         self.assertEqual(installers - referenced - bootstrap, set(),
                          "installer(s) unreachable from deploy.sh")
+
+
+class InterfaceEnvPreservationTests(unittest.TestCase):
+    """install-phase5 must reconcile interface.env, never rewrite it.
+
+    The file holds operator-set values -- GAME_INTERFACE_ADMIN_LOGINS above all. Truncating it
+    demotes every administrator to an ordinary viewer, which surfaces only as admin controls
+    quietly disappearing from the dashboard: nothing errors and nothing is logged. It is also
+    remote-triggered, since any edit to install-phase5.sh makes auto-deploy run it.
+    """
+
+    SCRIPT = (DEPLOY_SH.parent / "install-phase5.sh").read_text(encoding="utf-8")
+
+    def test_the_env_file_is_never_truncated(self) -> None:
+        # A single '>' redirect onto interface.env discards every other setting in it.
+        self.assertNotIn('> "${config_root}/interface.env"', self.SCRIPT)
+        self.assertNotIn('/dev/null "${config_root}/interface.env"', self.SCRIPT)
+
+    def test_an_existing_admin_list_survives_a_reinstall(self) -> None:
+        import subprocess, textwrap
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "interface.env"
+            env_file.write_text("TRUSTED_ACTOR_HEADER=0\n"
+                                "GAME_INTERFACE_ADMIN_LOGINS=admin@ex,other@ex\n"
+                                "UNRELATED=keep\n")
+            # The reconcile block, lifted verbatim in behaviour from install-phase5.sh.
+            subprocess.run(["bash", "-c", textwrap.dedent(f"""
+                env_file={env_file}
+                if grep -q '^TRUSTED_ACTOR_HEADER=' "$env_file"; then
+                    sed -i 's/^TRUSTED_ACTOR_HEADER=.*/TRUSTED_ACTOR_HEADER=1/' "$env_file"
+                else
+                    printf 'TRUSTED_ACTOR_HEADER=1\\n' >> "$env_file"
+                fi
+                if ! grep -q '^GAME_INTERFACE_ADMIN_LOGINS=' "$env_file"; then
+                    printf 'GAME_INTERFACE_ADMIN_LOGINS=\\n' >> "$env_file"
+                fi
+            """)], check=True)
+            result = env_file.read_text()
+        self.assertIn("GAME_INTERFACE_ADMIN_LOGINS=admin@ex,other@ex", result)
+        self.assertIn("TRUSTED_ACTOR_HEADER=1", result)
+        self.assertNotIn("TRUSTED_ACTOR_HEADER=0", result)
+        self.assertIn("UNRELATED=keep", result)
+
+    def test_the_admin_variable_is_seeded_so_it_is_discoverable(self) -> None:
+        self.assertIn("GAME_INTERFACE_ADMIN_LOGINS=", self.SCRIPT)
