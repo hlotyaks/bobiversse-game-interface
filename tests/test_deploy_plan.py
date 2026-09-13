@@ -85,3 +85,39 @@ class DeployPlanTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeployTriggerCoverageTests(unittest.TestCase):
+    """Every installed artefact must have a path that triggers its installer.
+
+    A file with no trigger deploys only by accident -- when something else in the same commit
+    happens to match -- and otherwise sits stale on the host indefinitely. That is how the
+    diagnostics wrapper drifted: it had no trigger at all, so gsi-diagnose stayed at whatever
+    version was last installed by hand.
+    """
+
+    DEPLOY = DEPLOY_SH.read_text(encoding="utf-8")
+
+    def test_metering_artefacts_trigger_the_meter_installer(self) -> None:
+        for path in ("tools/presence_meter.py", "tools/billing.py", "tools/ledger_admin.py",
+                     "tools/backfill_presence.py", "scripts/observe-presence.py",
+                     "deploy/etc/systemd/system/game-presence-meter.service",
+                     "deploy/etc/systemd/system/game-presence-observer.service",
+                     "deploy/var/lib/game-server-interface/player-identities.json",
+                     "scripts/install-usage-metering.sh"):
+            self.assertIn(path, self.DEPLOY, f"{path} has no deploy trigger")
+
+    def test_diagnostics_artefacts_trigger_their_installer(self) -> None:
+        for path in ("deploy/usr/local/sbin/gsi-diagnose", "deploy/etc/sudoers.d/gsi-diagnose",
+                     "scripts/install-diagnostics.sh"):
+            self.assertIn(path, self.DEPLOY, f"{path} has no deploy trigger")
+
+    def test_every_installer_script_is_reachable_from_deploy(self) -> None:
+        import re
+        installers = {p.name for p in DEPLOY_SH.parent.glob("install-*.sh")}
+        referenced = set(re.findall(r"install-[a-z0-9-]+\.sh", self.DEPLOY))
+        # install-phase2 and install-autodeploy bootstrap the host itself; they are run by hand
+        # before auto-deploy exists and cannot deploy themselves.
+        bootstrap = {"install-phase2.sh", "install-autodeploy.sh"}
+        self.assertEqual(installers - referenced - bootstrap, set(),
+                         "installer(s) unreachable from deploy.sh")

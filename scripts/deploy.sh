@@ -36,6 +36,7 @@ needs_phase3=0    # unprivileged interface image + static UI
 needs_meter=0     # presence meter / billing / ledger tools + meter unit + exclusion seed
 needs_catalog=0   # deployed catalog only (controller/meter read it fresh; no restart)
 needs_phase5=0    # tailscale serve publishing / firewall
+needs_diagnostics=0  # read-only gsi-diagnose wrapper + its scoped sudoers rule
 
 matches() { local path=$1; shift; local pattern; for pattern in "$@"; do [[ ${path} == ${pattern} ]] && return 0; done; return 1; }
 
@@ -54,11 +55,21 @@ for path in "${changed[@]}"; do
         needs_phase3=1
     fi
     if matches "${path}" "tools/presence_meter.py" "tools/billing.py" "tools/ledger_admin.py" \
+        "tools/backfill_presence.py" "scripts/observe-presence.py" \
         "deploy/etc/systemd/system/game-presence-meter.service" \
+        "deploy/etc/systemd/system/game-presence-observer.service" \
         "deploy/var/lib/game-server-interface/presence-exclusions.json" \
+        "deploy/var/lib/game-server-interface/player-identities.json" \
         "deploy/etc/game-server-interface/billing.yaml" \
         "scripts/install-usage-metering.sh"; then
         needs_meter=1
+    fi
+    # The diagnostics wrapper had no trigger at all, so gsi-diagnose silently stayed at whatever
+    # version was last installed by hand while the rest of the host moved on.
+    if matches "${path}" "deploy/usr/local/sbin/gsi-diagnose" \
+        "deploy/etc/sudoers.d/gsi-diagnose" \
+        "scripts/install-diagnostics.sh"; then
+        needs_diagnostics=1
     fi
     if matches "${path}" "deploy/etc/game-server-interface/catalog.yaml"; then
         needs_catalog=1
@@ -80,6 +91,7 @@ plan=()
 [[ ${needs_meter}   -eq 1 ]] && plan+=("presence meter (install-usage-metering.sh + restart)")
 [[ ${needs_catalog} -eq 1 ]] && plan+=("catalog (validate + install to /etc)")
 [[ ${needs_phase5}  -eq 1 ]] && plan+=("tailscale serve (install-phase5.sh)")
+[[ ${needs_diagnostics} -eq 1 ]] && plan+=("diagnostics wrapper (install-diagnostics.sh)")
 
 if [[ ${#plan[@]} -eq 0 ]]; then
     echo "deploy: ${old_ref:0:12}..${new_ref:0:12} touches nothing that needs installing"
@@ -111,6 +123,11 @@ if [[ ${needs_meter} -eq 1 ]]; then
     echo "==> install-usage-metering.sh (presence meter)"
     bash "${repo_root}/scripts/install-usage-metering.sh"
     systemctl restart game-presence-meter.service
+fi
+
+if [[ ${needs_diagnostics} -eq 1 ]]; then
+    echo "==> install-diagnostics.sh (read-only gsi-diagnose wrapper)"
+    bash "${repo_root}/scripts/install-diagnostics.sh"
 fi
 
 if [[ ${needs_catalog} -eq 1 ]]; then
