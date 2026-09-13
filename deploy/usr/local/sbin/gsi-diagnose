@@ -135,13 +135,20 @@ for line in logs.splitlines():
     if character and len(set(live.values())) == 1:
         chars[next(iter(live.values()))][character.group(1)] += 1
 
-mapped = {k: v for k, v in mapping.items() if v}
+def described(entry):
+    """Render a map entry, which is {"name","login"} or a bare name string."""
+    if isinstance(entry, dict):
+        name, login = entry.get("name") or "", entry.get("login") or ""
+        return f"{name}" + (f"  <{login}>" if login else "  (no login: billed, but sees no dashboard line)")
+    return str(entry or "")
+
+mapped = {k: v for k, v in mapping.items() if described(v).strip()}
 print(f"\n{len(seen)} player ID(s) seen in the game log, {len(mapped)} mapped to a login\n")
 for pid in sorted(seen, key=lambda k: seen[k][-1], reverse=True):
-    who = mapping.get(pid) or ""
+    who = described(mapping.get(pid))
     names = ", ".join(n for n, _ in chars[pid].most_common(3)) or "(never seen playing alone)"
     print(f"  {pid}")
-    print(f"     login      : {who if who else '** UNMAPPED -- playtime lands as UNATTRIBUTED **'}")
+    print(f"     billed as  : {who if who else '** UNMAPPED -- playtime lands as UNATTRIBUTED **'}")
     print(f"     characters : {names}")
     print(f"     sessions   : {len(seen[pid])}, last {seen[pid][-1]}")
     print(f"     profile    : https://steamcommunity.com/profiles/{pid}")
@@ -149,7 +156,7 @@ stale = sorted(set(mapping) - set(seen))
 if stale:
     print("\nmapped but never seen in the log (harmless):")
     for pid in stale:
-        print(f"  {pid} -> {mapping[pid] or '(blank)'}")
+        print(f"  {pid} -> {described(mapping[pid]) or '(blank)'}")
 print(f"\nedit: sudo nano {sys.argv[1]}   (re-read every cycle; no restart needed)")
 IDS
 }

@@ -23,6 +23,7 @@ install -o root -g root -m 0755 "${repo_root}/tools/presence_meter.py" "${instal
 install -o root -g root -m 0755 "${repo_root}/tools/billing.py" "${install_root}/billing.py"
 install -o root -g root -m 0755 "${repo_root}/tools/ledger_admin.py" "${install_root}/ledger_admin.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/observe-presence.py" "${install_root}/observe-presence.py"
+install -o root -g root -m 0755 "${repo_root}/tools/backfill_presence.py" "${install_root}/backfill_presence.py"
 
 # Root-owned billing config (nominal dry-run rates); do not overwrite an edited copy.
 install -d -o root -g root -m 0755 /etc/game-server-interface

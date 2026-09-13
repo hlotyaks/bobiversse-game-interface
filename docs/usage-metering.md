@@ -96,6 +96,28 @@ admin's SSH traffic for play — but they remain the way to say "this person run
 does not play this game". An exclusion matches either the player's tailnet login or their in-game
 name; the dashboard only accepts logins, so that is the usual form.
 
+### Rebuilding a bad stretch from the game log
+
+The meter samples live, so a window where it was stopped or misattributing leaves a ledger no
+recalculation can fix. The game log can fix it, within its retention: it records every connect and
+disconnect with a timestamp, so replaying it reconstructs exactly who was present when.
+
+    sudo tools/backfill_presence.py --dry-run          # what would change
+    sudo tools/backfill_presence.py                    # splice it in
+
+It writes the same record shape the live meter writes, taking `count` from the game's own `Session`
+block rather than from how many names it recovered — so the UNATTRIBUTED property is preserved
+rather than papered over. Only the named instance's samples inside the rebuilt window are replaced;
+other instances and other times are left untouched.
+
+**Order matters** when a bad stretch is wider than the log's retention. Clear the month first, then
+backfill, so the part the log cannot reach stays honestly meter-blind instead of keeping bad data:
+
+    sudo .../ledger_admin.py --clear-month 2026-09 --instance enshrouded-primary
+    sudo .../backfill_presence.py --instance enshrouded-primary
+
+The meter appends while this runs; the rewrite is atomic, so at worst one concurrent sample is lost.
+
 Correcting a bad capture after the fact:
 `sudo /usr/local/libexec/game-server-interface/ledger_admin.py --remove-login <login>` (add
 `--dry-run` first), or `--clear-month YYYY-MM --instance <id>` to retire a month whose capture is
@@ -115,6 +137,7 @@ and an `IDENTITY_READERS` entry for the identities. Games that log neither fall 
 | Live observer | [scripts/observe-presence.py](../scripts/observe-presence.py) | Read-only. Run as root during a real session to watch the count, every peer's byte deltas/EWMA, what the meter would attribute, and the conntrack flows side by side. The tool for diagnosing a *who* failure. |
 | Presence ledger | `/var/lib/game-server-interface/presence.jsonl` | Append-only JSONL, one line per instance per cycle: `{"ts","instance","present":[logins],"count":N}`. `count` is the game's own client count and `present` is only who the meter could name, so `count >= len(present)`; `"count": null` means the occupancy read failed (unknown, *not* nobody). Root-owned, `0600` — it is playtime metadata (who played when); treat it as private, like the audit log. |
 | Billing config | [deploy/etc/game-server-interface/billing.yaml](../deploy/etc/game-server-interface/billing.yaml) | Nominal per-instance run-cost and the group-size multiplier schedule `m(n)`. No secrets. |
+| Ledger backfill | [tools/backfill_presence.py](../tools/backfill_presence.py) | Replays the game log to rebuild presence samples for a past window, splicing them over whatever the meter recorded. |
 | Billing calculator | [tools/billing.py](../tools/billing.py) | Pure calculator over the ledger. Produces per-user hours, solo/group split, sessions, and the dry-run bill (text or `--json`). |
 
 ## Counting and naming are separate problems
