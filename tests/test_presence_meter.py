@@ -548,3 +548,43 @@ class GameLogIdentityTests(unittest.TestCase):
             rows = [json.loads(l) for l in ledger.read_text().splitlines()]
         primary = [r for r in rows if r["instance"] == "enshrouded-primary"][0]
         self.assertEqual(primary["present"], ["Alice"])
+
+
+class RepositoryPrivacyTests(unittest.TestCase):
+    """Real player identities are host state, never repository content.
+
+    This repository is public. The tracked identity file is a template: the live mapping lives at
+    /var/lib/game-server-interface/player-identities.json, root-owned 0600. Committing real Steam
+    IDs or tailnet logins here would publish other people's accounts and email addresses
+    irreversibly, so guard it rather than relying on remembering.
+    """
+
+    SEED = REPO_ROOT / "deploy/var/lib/game-server-interface/player-identities.json"
+
+    def test_the_tracked_identity_map_carries_no_real_players(self) -> None:
+        import json
+        payload = json.loads(self.SEED.read_text(encoding="utf-8"))
+        self.assertEqual(payload.get("identities"), {},
+                         "real identities must live on the host, not in this public repository")
+
+    def test_no_real_looking_credentials_in_tracked_files(self) -> None:
+        import re, subprocess
+        # A Steam ID that is not one of the documented example values, or a personal-looking
+        # address, in anything tracked here.
+        tracked = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
+                                 capture_output=True, text=True).stdout.split()
+        steam = re.compile(r"7656119\d{10}")
+        offenders = []
+        for name in tracked:
+            path = REPO_ROOT / name
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for found in steam.findall(text):
+                # Example IDs are the 7656119000000000N block reserved for documentation.
+                if not found.startswith("765611900000000"):
+                    offenders.append(f"{name}: {found}")
+        self.assertEqual(offenders, [], f"real-looking Steam IDs in tracked files: {offenders}")

@@ -32,7 +32,7 @@ within a minute with **no restart**:
 
 ```json
 "identities": {
-  "76561190000000001": {"name": "SomeCharacter", "login": "cbrinton@gmail.com"},
+  "76561190000000001": {"name": "SomeCharacter", "login": "someone@example.com"},
   "76561190000000002": {"name": "OtherCharacter", "login": ""}
 }
 ```
