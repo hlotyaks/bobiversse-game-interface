@@ -204,6 +204,14 @@ weeks kept). A *single* player logging in is a useful test on its own: if the lo
 [presence-source-conntrack-findings.md](presence-source-conntrack-findings.md), whose central
 claim (that conntrack cannot see tailnet traffic) has been shown to be wrong.
 
+How far back the meter reads when asking a game its player count depends on how that game reports
+it. Enshrouded prints a periodic snapshot, so the last two minutes always contain one. Valheim
+prints a *running total* only when someone joins or leaves, so a quiet server has nothing in a
+short window and would read as **unknown** — billing that as meter-blind, and accruing unbilled
+blind hours for a server that is simply empty. Games like that are read over a long window
+(`OCCUPANCY_WINDOWS`), where the most recent total is still current however long ago it was
+printed.
+
 **A game that reports its own occupancy never falls back to bandwidth ranking.** A failed read is
 recorded as unknown and billed as nothing. The `--min-kbps` fallback now applies only to games with
 no entry in `OCCUPANCY_READERS`.
