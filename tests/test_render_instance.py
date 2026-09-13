@@ -120,6 +120,12 @@ class ValheimAdapterTests(unittest.TestCase):
         self.assertEqual(service["environment"]["SERVER_PORT"], "2456")
         self.assertIn("100.84.161.38:2456:2456/udp", [str(p) for p in service["ports"]])
 
+    def test_world_directories_stay_traversable(self) -> None:
+        # The image chmods entries in worlds_local with WORLDS_FILE_PERMISSIONS (default 0644).
+        # Valheim stores each world as a directory, and 0644 on a directory removes the execute
+        # bit, so the server cannot open the files inside and hangs before binding its sockets.
+        self.assertEqual(self._service()["environment"]["WORLDS_FILE_PERMISSIONS"], "0755")
+
     def test_both_persistent_paths_are_bound(self) -> None:
         targets = {volume["target"] for volume in self._service()["volumes"]}
         self.assertEqual(targets, {"/config", "/opt/valheim"})

@@ -158,6 +158,15 @@ def render_valheim(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
                     "SERVER_PUBLIC": "1",
                     "PUID": uid,
                     "PGID": gid,
+                    # The image chmods every entry in worlds_local with WORLDS_FILE_PERMISSIONS,
+                    # which defaults to 0644. Modern Valheim stores each world as a *directory*,
+                    # and 0644 on a directory strips the execute bit that makes it traversable: the
+                    # server can list the world but not open the files inside it, so it spins on
+                    # "The WorldGenerator instance was null" and never binds its UDP sockets. The
+                    # failure looks like a hang, not a permissions error. 0755 keeps world
+                    # directories traversable; the executable bit it also sets on world data files
+                    # is inert.
+                    "WORLDS_FILE_PERMISSIONS": "0755",
                 },
                 # SERVER_NAME, WORLD_NAME and the secret SERVER_PASS live in this root-only file
                 # written by the provisioning script -- never in the catalog.

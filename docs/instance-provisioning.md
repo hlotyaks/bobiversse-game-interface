@@ -93,6 +93,12 @@ sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_c
 - **Two consecutive UDP ports.** The server derives its query port as `SERVER_PORT + 1` and cannot
   be told otherwise, so the adapter refuses a gapped catalog reservation rather than publishing a
   port nothing listens on.
+- **`WORLDS_FILE_PERMISSIONS=0755`** is required, not cosmetic. The image chmods every entry in
+  `worlds_local` with that value, which defaults to `0644`; modern Valheim stores each world as a
+  *directory*, and `0644` on a directory strips the execute bit that makes it traversable. The
+  server can then list the world but not open the files inside, so it spins on `The WorldGenerator
+  instance was null` and never binds its UDP sockets. It presents as a hang with no permissions
+  error anywhere, and `supervisorctl status` shows everything RUNNING.
 - **Two persistent paths**: `/config` (worlds, backups, configuration) and `/opt/valheim` (the
   downloaded server build). Both are bind mounts under `/srv/games/valheim-<instance>/`.
 
