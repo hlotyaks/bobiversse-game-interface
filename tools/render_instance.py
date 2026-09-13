@@ -146,9 +146,16 @@ def render_valheim(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
                 "stop_grace_period": "120s",
                 "environment": {
                     "SERVER_PORT": str(game_port),
-                    # Never advertise on Steam's public server list: this world is tailnet-only,
-                    # and the published ports are bound to the tailnet IP alone.
-                    "SERVER_PUBLIC": "0",
+                    # Listed in Valheim's community server browser. This is not the belt-and-braces
+                    # choice it looks like the opposite of: Valheim carries gameplay over Steam's
+                    # relay, not the tailnet, so binding the ports to the tailnet IP does not gate
+                    # who can reach the game -- it only gates the A2S query. With SERVER_PUBLIC=0
+                    # and no crossplay, the image's own logic (see its valheim/common) leaves the
+                    # server unqueryable and undiscoverable, so nobody can join at all. Entry is
+                    # gated by SERVER_PASS; only the server's name is public.
+                    # The private alternative is CROSSPLAY=true, which swaps Steam's relay for
+                    # PlayFab's and issues a join code instead of listing the server.
+                    "SERVER_PUBLIC": "1",
                     "PUID": uid,
                     "PGID": gid,
                 },

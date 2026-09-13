@@ -105,8 +105,11 @@ class ValheimAdapterTests(unittest.TestCase):
         self.assertEqual(sorted(service["cap_add"]), ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"])
         self.assertIn("no-new-privileges:true", service["security_opt"])
 
-    def test_never_advertises_on_the_public_steam_server_list(self) -> None:
-        self.assertEqual(self._service()["environment"]["SERVER_PUBLIC"], "0")
+    def test_is_discoverable_so_players_can_actually_join(self) -> None:
+        # SERVER_PUBLIC=0 with no crossplay leaves the server unqueryable and undiscoverable:
+        # Valheim carries gameplay over Steam's relay rather than the tailnet, so the tailnet-only
+        # port binding never gated access in the first place. Entry is gated by SERVER_PASS.
+        self.assertEqual(self._service()["environment"]["SERVER_PUBLIC"], "1")
 
     def test_ports_are_published_only_on_the_tailnet_ip(self) -> None:
         for published in self._service()["ports"]:
