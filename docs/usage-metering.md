@@ -242,6 +242,40 @@ too high for that game — lower it in the unit's `ExecStart`. If a non-player (
 wrongly counted, raise it. Background on why this replaced the conntrack source is in
 [presence-source-conntrack-findings.md](presence-source-conntrack-findings.md).
 
+## Several games at once
+
+The ledger is keyed by instance, so playtime is already separated per game with no extra
+configuration — every configured slot is sampled every cycle whether or not it is running. A
+combined bill breaks each player's hours out per game and sums the charges:
+
+    sudo /usr/local/sbin/gsi-diagnose all-games
+    # or: billing.py --all-games [--month YYYY-MM] [--json]
+
+    player                enshrouded-primary     valheim-primary     total       bill
+    Gronk                               2.00                1.00      3.00   USD 0.28
+    Michala                             0.00                1.75      1.75   USD 0.26
+
+Each game is costed on **its own** rate and group-size multiplier, then summed per player: soloing
+one game while three people play another are different prices, and a combined-hours figure could
+not express that. Games that saw no play in the month are left out.
+
+### Adding a game
+
+Two things gate whether a new game bills correctly, and neither fails loudly:
+
+1. **A rate in `billing.yaml`.** A slot with no `run_cost_per_hour` accrues playtime and bills
+   **zero** — a working-looking bill that happens to be free. The combined report prints a WARNING
+   naming any such game, and a test asserts every catalog slot is priced.
+2. **An occupancy reader and an identity reader** keyed by template in
+   [tools/presence_meter.py](../tools/presence_meter.py) (`OCCUPANCY_READERS`, `IDENTITY_READERS`).
+   Without them the meter falls back to the `--min-kbps` tailnet heuristic, which on this host
+   identifies **nobody**: players reach Steam-relayed games over Steam's network, so the tailnet
+   carries no game traffic to measure. The symptom is a game whose hours are all UNATTRIBUTED.
+
+Writing the two readers needs a sample of that game's server log with players connected — what it
+prints when someone joins, leaves, and while they are on. Both are small functions; Enshrouded's are
+the worked example.
+
 ## Web dashboard
 
 The dashboard is organised as a left **sidebar** with pages: **Controls** (the game catalog,

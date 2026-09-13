@@ -16,7 +16,7 @@ UNIT=game-presence-meter.service
 INSTANCE_RE='^[a-z0-9-]+$'
 
 usage() {
-  echo "usage: gsi-diagnose {ledger|bill|meter-log|observer|identities|all} [instance-id]" >&2
+  echo "usage: gsi-diagnose {ledger|bill|all-games|meter-log|observer|identities|all} [instance-id]" >&2
   echo "  read-only. instance-id defaults to enshrouded-primary." >&2
   exit 2
 }
@@ -166,10 +166,12 @@ case "$sub" in
   observer)  observer_tail ;;
   identities) identities_report ;;
   bill)      "$BILLING" --instance "$inst" ;;
+  all-games) "$BILLING" --all-games ;;
   meter-log) journalctl -u "$UNIT" --no-pager -n 120 ;;
   all)
     echo "########## presence ledger ##########"; ledger_stats
     echo; echo "########## billing ($inst) ##########"; "$BILLING" --instance "$inst" || true
+    echo; echo "########## billing (all games) ##########"; "$BILLING" --all-games || true
     echo; echo "########## meter journal (tail) ##########"; journalctl -u "$UNIT" --no-pager -n 40
     echo; echo "########## attribution observer ##########"; observer_tail || true
     echo; echo "########## player identities ##########"; identities_report || true ;;
