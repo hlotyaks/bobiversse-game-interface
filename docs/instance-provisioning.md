@@ -17,7 +17,10 @@ reused by both the controller and the renderer.
 - [tools/render_instance.py](../tools/render_instance.py) — pure renderer. Resolves a
   `(template, instance)` slot and emits `compose.yaml` plus `game-<template>-<instance>.service`.
   No privileged side effects; run it with no `--output-dir` to preview the files. Per-game
-  differences live in small adapters (the `enshrouded` adapter is implemented).
+  differences live in small adapters (`enshrouded` and `valheim` are implemented).
+  `--describe <template>` prints that template's provisioning facts as JSON — the directories to
+  create, the uid:gid that must own them, and the secret env keys to prompt for. The provisioning
+  script consumes it, so adding a game is one edit here rather than two files that can drift.
 - [scripts/provision-game-instance.sh](../scripts/provision-game-instance.sh) — root
   orchestrator. Validates the catalog, creates the service account (`create-game-account`),
   makes the savegame bind-mount owned by the container UID, writes the root-only secret env,
@@ -52,6 +55,34 @@ sudo ./scripts/game-firewall.sh 15636 15637
 sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_client.py \
   '{"action":"start","template_id":"enshrouded","instance_id":"primary","actor":"<you>"}'
 ```
+
+## Adding a game
+
+1. Add a Compose adapter and a `PROVISIONING` entry to `tools/render_instance.py`. Read the
+   image's real contract — its entrypoint, the paths it persists, the env it reads, whether it
+   needs to start as root — rather than assuming; `docker run --entrypoint /bin/sh <image>` is
+   the fastest way to check.
+2. Give every slot a `run_cost_per_hour` in `billing.yaml`, or its playtime bills as zero.
+3. Add an `OCCUPANCY_READERS` and an `IDENTITY_READERS` entry in `tools/presence_meter.py`, which
+   needs a sample of that game's server log with players connected. Without them the meter falls
+   back to a tailnet heuristic that identifies nobody for a Steam-relayed game; see
+   [usage-metering.md](usage-metering.md).
+
+## Valheim notes
+
+- **It starts as root on purpose.** The bootstrap runs `groupmod`, rewrites `/etc/passwd`, and
+  `chown -R`s the data tree before supervisord drops to `PUID:PGID`. A blanket `cap_drop: [ALL]`
+  as used for Enshrouded kills it at startup, so the adapter drops everything and adds back only
+  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID` — taken from that script, not assumed.
+  `no-new-privileges` still applies, ports are still tailnet-only, and caps are still a deny-list
+  of one.
+- **`SERVER_PUBLIC=0`** is set in the adapter: the world must never appear on Steam's public
+  server list. Players join by direct-connect to the tailnet address.
+- **Two consecutive UDP ports.** The server derives its query port as `SERVER_PORT + 1` and cannot
+  be told otherwise, so the adapter refuses a gapped catalog reservation rather than publishing a
+  port nothing listens on.
+- **Two persistent paths**: `/config` (worlds, backups, configuration) and `/opt/valheim` (the
+  downloaded server build). Both are bind mounts under `/srv/games/valheim-<instance>/`.
 
 ## Security model notes
 

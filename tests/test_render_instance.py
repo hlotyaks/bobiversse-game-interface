@@ -76,9 +76,82 @@ class RenderEnshroudedTests(unittest.TestCase):
     def test_rejects_unknown_or_unadapted_templates(self) -> None:
         with self.assertRaises(ValueError):
             RENDER.render(CATALOG, "enshrouded", "unapproved", "100.84.161.38")
+        # A template in the catalog with no Compose adapter must refuse rather than render
+        # something generic. (valheim gained an adapter on 2026-09-13; enshrouded and valheim are
+        # now both adapted, so this uses a template that is not in the catalog at all.)
         with self.assertRaises(ValueError):
-            RENDER.render(CATALOG, "valheim", "primary", "100.84.161.38")  # no adapter yet
+            RENDER.render(CATALOG, "no-such-game", "primary", "100.84.161.38")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ValheimAdapterTests(unittest.TestCase):
+    """The Valheim image has a different privilege and storage contract from Enshrouded's.
+
+    It deliberately starts as root -- its bootstrap runs groupmod, rewrites /etc/passwd and
+    chowns the data tree before supervisord drops to PUID:PGID -- so a blanket cap_drop:[ALL]
+    kills it at startup. These assertions are taken from the pinned image's own bootstrap script.
+    """
+
+    def _service(self, instance="primary"):
+        rendered = RENDER.render(CATALOG, "valheim", instance, "100.84.161.38")
+        return yaml.safe_load(rendered["compose.yaml"])["services"]["server"]
+
+    def test_drops_all_capabilities_then_adds_back_only_what_bootstrap_needs(self) -> None:
+        service = self._service()
+        self.assertEqual(service["cap_drop"], ["ALL"])
+        self.assertEqual(sorted(service["cap_add"]), ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"])
+        self.assertIn("no-new-privileges:true", service["security_opt"])
+
+    def test_never_advertises_on_the_public_steam_server_list(self) -> None:
+        self.assertEqual(self._service()["environment"]["SERVER_PUBLIC"], "0")
+
+    def test_ports_are_published_only_on_the_tailnet_ip(self) -> None:
+        for published in self._service()["ports"]:
+            self.assertTrue(str(published).startswith("100.84.161.38:"), published)
+
+    def test_server_port_matches_the_catalog_reservation(self) -> None:
+        service = self._service()
+        self.assertEqual(service["environment"]["SERVER_PORT"], "2456")
+        self.assertIn("100.84.161.38:2456:2456/udp", [str(p) for p in service["ports"]])
+
+    def test_both_persistent_paths_are_bound(self) -> None:
+        targets = {volume["target"] for volume in self._service()["volumes"]}
+        self.assertEqual(targets, {"/config", "/opt/valheim"})
+
+    def test_non_consecutive_ports_are_refused(self) -> None:
+        # The server derives its query port as SERVER_PORT+1 and cannot be told otherwise, so a
+        # gapped reservation would publish a port nothing listens on.
+        resolved = {"template_id": "valheim", "instance_id": "primary",
+                    "paths": {"instance_data": "/srv/games/valheim-primary",
+                              "compose_project": "game-valheim-primary"},
+                    "resource_limits": {"compose": {"mem_limit": "4096m", "cpus": 2}},
+                    "image": "img", "image_digest": "sha256:x",
+                    "ports": [{"protocol": "udp", "host": 2456}, {"protocol": "udp", "host": 2460}]}
+        with self.assertRaises(ValueError):
+            RENDER.render_valheim(resolved, "100.84.161.38")
+
+    def test_secondary_slot_renders_on_its_own_ports(self) -> None:
+        service = self._service("secondary")
+        self.assertEqual(service["environment"]["SERVER_PORT"], "2460")
+
+
+class ProvisioningProfileTests(unittest.TestCase):
+    """Per-template provisioning facts live beside the adapters so the two cannot drift."""
+
+    def test_every_adapter_has_a_provisioning_profile(self) -> None:
+        self.assertEqual(set(RENDER.ADAPTERS), set(RENDER.PROVISIONING))
+
+    def test_profiles_name_directories_owner_and_secret_keys(self) -> None:
+        for template, profile in RENDER.PROVISIONING.items():
+            self.assertTrue(profile["data_dirs"], template)
+            self.assertRegex(profile["uid_gid"], r"^\d+:\d+$")
+            self.assertTrue(profile["secret_keys"], template)
+
+    def test_valheim_profile_matches_the_paths_the_adapter_binds(self) -> None:
+        rendered = RENDER.render(CATALOG, "valheim", "primary", "100.84.161.38")
+        sources = {volume["source"].rsplit("/", 1)[-1]
+                   for volume in yaml.safe_load(rendered["compose.yaml"])["services"]["server"]["volumes"]}
+        self.assertEqual(sources, set(RENDER.PROVISIONING["valheim"]["data_dirs"]))
