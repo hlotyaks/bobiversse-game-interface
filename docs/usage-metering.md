@@ -123,14 +123,31 @@ Correcting a bad capture after the fact:
 `--dry-run` first), or `--clear-month YYYY-MM --instance <id>` to retire a month whose capture is
 not trustworthy.
 
+Where a game names players only by their character, record those names so the meter can resolve
+them:
+
+```json
+"76561190000000001": {"name": "Rhadamanthus", "login": "someone@example.com",
+                      "characters": {"valheim": ["Rhad"], "enshrouded": ["Rhadamanthus"]}}
+```
+
+`sudo /usr/local/sbin/gsi-diagnose identities` lists, per game, the character names it has observed
+each player using and flags any not yet recorded, so filling this in is a copy-paste job.
+
 Valheim's readers are the second worked example, and they show the shape is not always the same.
 Valheim names a player as they arrive but **not** as they leave, so identity is carried across
 three lines — the Steam ID on connect, the ZDO owner id of their character, and the running
-`now N player(s)` total — and a departure is matched only by that owner id reappearing. Where two
-players arrive close enough together that the pairing would be ambiguous, neither is named rather
-than risking a transposition; the game's own count still reports them, so they reach the bill as
-UNATTRIBUTED. A `now 0 player(s)` line clears the set outright, which makes the reader
-self-correcting: drift cannot outlive a session.
+`now N player(s)` total — and a departure is matched only by that owner id reappearing. That arrival-to-character
+gap is wide — ~20s measured, since it spans the client loading the world — so two people starting a
+session together interleave as a matter of course rather than as an edge case.
+
+**Recorded character names resolve that outright**: the character line names the player directly,
+however simultaneously they joined, and recognising one player narrows the field for the next.
+Only where a character is unrecognised *and* more than one arrival is outstanding does the reader
+decline to name anyone, rather than pairing by arrival order and risking a transposition; the
+game's own count still reports them, so they reach the bill as UNATTRIBUTED. A `now 0 player(s)`
+line clears the set outright, which makes the reader self-correcting: drift cannot outlive a
+session.
 
 Adding a new game means writing two small functions keyed by template in
 [tools/presence_meter.py](../tools/presence_meter.py): an `OCCUPANCY_READERS` entry for the count

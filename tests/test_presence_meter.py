@@ -482,9 +482,9 @@ class GameLogIdentityTests(unittest.TestCase):
                 "555": 5,
             }}))
             loaded = METER.load_player_identities(path)
-        self.assertEqual(loaded, {"111": {"name": "Alice", "login": "alice@ex"},
-                                  "222": {"name": "Bob", "login": ""},
-                                  "333": {"name": "Cara", "login": ""}})
+        self.assertEqual(loaded, {"111": {"name": "Alice", "login": "alice@ex", "characters": {}},
+                                  "222": {"name": "Bob", "login": "", "characters": {}},
+                                  "333": {"name": "Cara", "login": "", "characters": {}}})
 
     def test_missing_identity_map_is_empty_not_an_error(self) -> None:
         from pathlib import Path
@@ -635,18 +635,46 @@ class ValheimReaderTests(unittest.TestCase):
         ]
         self.assertEqual(METER.valheim_connected_players("\n".join(self.JOIN + self.LEAVE + rejoin)), ["111"])
 
+    SIMULTANEOUS = [
+        "PlayFab socket with remote ID playfab/AAA received local Platform ID Steam_111",
+        "PlayFab socket with remote ID playfab/BBB received local Platform ID Steam_222",
+        "Got character ZDOID from Rhad : 500:1",
+        "Got character ZDOID from Gronk : 501:1",
+        'Player joined server "W" that has join code 1, now 2 player(s)',
+    ]
+
+    def test_recorded_characters_resolve_simultaneous_arrivals(self) -> None:
+        # The ~20s gap between an arrival and its character means a group starting together
+        # interleaves as a matter of course. Knowing the character names settles it outright.
+        named = METER.valheim_connected_players(
+            "\n".join(self.SIMULTANEOUS), {"Rhad": "111", "Gronk": "222"})
+        self.assertEqual(named, ["111", "222"])
+
+    def test_recognising_one_player_disambiguates_the_other(self) -> None:
+        # Only Rhad is recorded. Striking his arrival leaves exactly one candidate for Gronk's
+        # character, so both end up named without any ordering assumption.
+        named = METER.valheim_connected_players("\n".join(self.SIMULTANEOUS), {"Rhad": "111"})
+        self.assertEqual(named, ["111", "222"])
+
+    def test_a_recorded_character_is_matched_on_departure_too(self) -> None:
+        lines = self.SIMULTANEOUS + ["Destroying abandoned non persistent zdo 500:2 owner 500"]
+        named = METER.valheim_connected_players("\n".join(lines), {"Rhad": "111", "Gronk": "222"})
+        self.assertEqual(named, ["222"])
+
+    def test_an_unrecorded_character_does_not_borrow_anothers_identity(self) -> None:
+        # A stranger joining alongside a known player must not be named as anyone.
+        lines = ["PlayFab socket with remote ID playfab/AAA received local Platform ID Steam_111",
+                 "PlayFab socket with remote ID playfab/ZZZ received local Platform ID Steam_999",
+                 "Got character ZDOID from Stranger : 700:1",
+                 "Got character ZDOID from Rhad : 500:1"]
+        named = METER.valheim_connected_players("\n".join(lines), {"Rhad": "111"})
+        self.assertEqual(named, ["111"])
+
     def test_simultaneous_arrivals_are_left_unnamed_rather_than_transposed(self) -> None:
         # Two arrivals pending when a character appears: the pairing is ambiguous, and billing the
         # wrong person is worse than billing nobody. The game's count still reports them, so they
         # reach the bill as UNATTRIBUTED.
-        lines = [
-            "PlayFab socket with remote ID playfab/AAA received local Platform ID Steam_111",
-            "PlayFab socket with remote ID playfab/BBB received local Platform ID Steam_222",
-            "Got character ZDOID from Rhad : 500:1",
-            "Got character ZDOID from Gronk : 501:1",
-            'Player joined server "W" that has join code 1, now 2 player(s)',
-        ]
-        text = "\n".join(lines)
+        text = "\n".join(self.SIMULTANEOUS)
         self.assertEqual(METER.valheim_connected_players(text), [])
         self.assertEqual(METER.valheim_client_count(text), 2)  # still counted
 
@@ -678,3 +706,41 @@ class ValheimReaderTests(unittest.TestCase):
             'Player connection lost server "W" that has join code 1, now 1 player(s)',
         ]
         self.assertEqual(METER.valheim_connected_players("\n".join(lines)), ["222"])
+
+
+class CharacterIndexTests(unittest.TestCase):
+    """Per-game character names in the identity map, used to name players a game only names by
+    their character."""
+
+    IDS = {
+        "111": {"name": "Rhadamanthus", "login": "a@ex",
+                "characters": {"valheim": ["Rhad"], "enshrouded": ["Rhadamanthus"]}},
+        "222": {"name": "Gronk", "login": "b@ex", "characters": {"valheim": ["Gronk", "Gronk2"]}},
+        "333": {"name": "NoChars", "login": "c@ex", "characters": {}},
+    }
+
+    def test_index_is_per_game(self) -> None:
+        self.assertEqual(METER.character_index(self.IDS, "valheim"),
+                         {"Rhad": "111", "Gronk": "222", "Gronk2": "222"})
+        self.assertEqual(METER.character_index(self.IDS, "enshrouded"), {"Rhadamanthus": "111"})
+
+    def test_a_player_may_have_several_characters_in_one_game(self) -> None:
+        index = METER.character_index(self.IDS, "valheim")
+        self.assertEqual(index["Gronk"], index["Gronk2"])
+
+    def test_a_game_with_no_recorded_characters_yields_an_empty_index(self) -> None:
+        self.assertEqual(METER.character_index(self.IDS, "no-such-game"), {})
+
+    def test_characters_survive_loading_from_disk(self) -> None:
+        import json, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "ids.json"
+            path.write_text(json.dumps({"identities": {
+                "111": {"name": "Rhadamanthus", "login": "a@ex",
+                        "characters": {"valheim": ["Rhad", 5], "enshrouded": "notalist"}},
+                "222": "BareString",
+            }}))
+            loaded = METER.load_player_identities(path)
+        self.assertEqual(loaded["111"]["characters"], {"valheim": ["Rhad"]})
+        self.assertEqual(loaded["222"], {"name": "BareString", "login": "", "characters": {}})
