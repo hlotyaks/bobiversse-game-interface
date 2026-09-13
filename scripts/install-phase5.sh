@@ -38,7 +38,10 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 [[ -S /run/game-server-interface/web/interface.sock ]]
-systemctl enable --now game-server-interface-serve.service
+systemctl enable game-server-interface-serve.service
+# restart, not "enable --now": --now will not reload a unit that is already running, leaving the
+# previously-started process on the old code after a reinstall.
+systemctl restart game-server-interface-serve.service
 bash "${repo_root}/scripts/validate-phase5-firewall.sh"
 tailscale serve status --json
 printf 'Private HTTPS interface: https://bobiverse.tail40344b.ts.net/\n'

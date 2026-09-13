@@ -9,12 +9,14 @@
 set -euo pipefail
 
 LEDGER=/var/lib/game-server-interface/presence.jsonl
+IDENTITIES=/var/lib/game-server-interface/player-identities.json
+OBSERVER=/var/lib/game-server-interface/presence-observer.jsonl
 BILLING=/usr/local/libexec/game-server-interface/billing.py
 UNIT=game-presence-meter.service
 INSTANCE_RE='^[a-z0-9-]+$'
 
 usage() {
-  echo "usage: gsi-diagnose {ledger|bill|meter-log|all} [instance-id]" >&2
+  echo "usage: gsi-diagnose {ledger|bill|meter-log|observer|identities|all} [instance-id]" >&2
   echo "  read-only. instance-id defaults to enshrouded-primary." >&2
   exit 2
 }
@@ -56,13 +58,113 @@ for inst, d in sorted(by.items()):
 PY
 }
 
+# Recent attribution evidence from game-presence-observer.service: the game's own client count,
+# who attribution named, and what conntrack saw. This is the log to read when a bill is missing
+# players -- the meter itself records only its conclusion, never how it reached it.
+observer_tail() {
+  python3 - "$OBSERVER" <<'OBS'
+import json, sys, collections
+try:
+    lines = open(sys.argv[1]).read().splitlines()
+except FileNotFoundError:
+    print("no observer log yet:", sys.argv[1]); sys.exit(0)
+records = [json.loads(l) for l in lines if l.strip()]
+if not records:
+    print("observer log is empty"); sys.exit(0)
+reasons = collections.Counter(r.get("reason") for r in records)
+print(f"{len(records)} record(s): " + ", ".join(f"{k}={v}" for k, v in reasons.most_common()))
+print(f"span: {records[0]['ts']} .. {records[-1]['ts']}")
+print()
+interesting = [r for r in records if r.get("reason") not in ("heartbeat", "startup")]
+print(f"--- last 25 cycles with players or a failure ({len(interesting)} total) ---")
+for r in interesting[-25:]:
+    named = ",".join(r.get("attributed") or []) or "-"
+    by_bytes = r.get("attributed_by_byte_rate")
+    ct = r.get("conntrack") or {}
+    ctl = ",".join(ct.get("logins") or []) or "-"
+    print(f"{r['ts'][11:19]}  count={r.get('count')} unnamed={r.get('unnamed')} "
+          f"named=[{named}]  conntrack={ct.get('flows')} [{ctl}]")
+    if by_bytes is not None:
+        # The superseded byte-rate ranking, shadow-computed. DIFFERS is expected whenever a
+        # DERP-relayed player is connected: byte counters read 0 for them, so it names too few.
+        verdict = "same" if by_bytes == (r.get("attributed") or []) else "*** DIFFERS ***"
+        print(f"      byte-rate (old): [{','.join(by_bytes) or '-'}]  {verdict}")
+    for peer in (r.get("peers") or [])[:6]:
+        path = "direct" if peer.get("direct") else "DERP"
+        wrote = f"{peer['last_write_s']}s" if peer.get("last_write_s") is not None else "never"
+        print(f"      {peer['login']:<38} kbps={peer['kbps']:<7} ewma={peer['ewma']:<7} "
+              f"{path:<7} wrote={wrote}")
+OBS
+}
+
+# Which in-game player IDs the game has seen, and which still have no tailnet login mapped. An
+# unmapped player is counted but never named, so their playtime lands on the bill as UNATTRIBUTED --
+# this is the list to work through when a bill shows hours nobody was charged for.
+identities_report() {
+  python3 - "$IDENTITIES" <<'IDS'
+import json, re, subprocess, sys, collections
+ADD  = re.compile(r"\[online\] Added peer (\S+) \(steamid:(\d+)\)")
+DROP = re.compile(r"\[online\] (?:Removed peer|Timeout for peer) (\S+)")
+# The game sends a character savegame during play. Attributed only when exactly one player is
+# connected, so the name is unambiguous -- it is the practical way to recognise who an ID belongs
+# to without asking everyone for their Steam profile.
+CHAR = re.compile(r"Sending Character Savegame '([^']+)'")
+
+try:
+    mapping = (json.load(open(sys.argv[1])).get("identities") or {})
+except (FileNotFoundError, ValueError):
+    mapping = {}
+    print(f"no identity map yet: {sys.argv[1]}")
+
+try:
+    logs = subprocess.run(["docker", "logs", "-t", "game-enshrouded-primary"],
+                          capture_output=True, text=True, timeout=180).stdout
+except Exception as exc:
+    print("could not read game log:", exc); logs = ""
+
+live, chars, seen = {}, collections.defaultdict(collections.Counter), collections.defaultdict(list)
+for line in logs.splitlines():
+    stamp = line.split(" ", 1)[0][:19]
+    added = ADD.search(line)
+    if added:
+        live[added.group(1)] = added.group(2); seen[added.group(2)].append(stamp); continue
+    dropped = DROP.search(line)
+    if dropped:
+        live.pop(dropped.group(1), None); continue
+    character = CHAR.search(line)
+    if character and len(set(live.values())) == 1:
+        chars[next(iter(live.values()))][character.group(1)] += 1
+
+mapped = {k: v for k, v in mapping.items() if v}
+print(f"\n{len(seen)} player ID(s) seen in the game log, {len(mapped)} mapped to a login\n")
+for pid in sorted(seen, key=lambda k: seen[k][-1], reverse=True):
+    who = mapping.get(pid) or ""
+    names = ", ".join(n for n, _ in chars[pid].most_common(3)) or "(never seen playing alone)"
+    print(f"  {pid}")
+    print(f"     login      : {who if who else '** UNMAPPED -- playtime lands as UNATTRIBUTED **'}")
+    print(f"     characters : {names}")
+    print(f"     sessions   : {len(seen[pid])}, last {seen[pid][-1]}")
+    print(f"     profile    : https://steamcommunity.com/profiles/{pid}")
+stale = sorted(set(mapping) - set(seen))
+if stale:
+    print("\nmapped but never seen in the log (harmless):")
+    for pid in stale:
+        print(f"  {pid} -> {mapping[pid] or '(blank)'}")
+print(f"\nedit: sudo nano {sys.argv[1]}   (re-read every cycle; no restart needed)")
+IDS
+}
+
 case "$sub" in
   ledger)    ledger_stats ;;
+  observer)  observer_tail ;;
+  identities) identities_report ;;
   bill)      "$BILLING" --instance "$inst" ;;
   meter-log) journalctl -u "$UNIT" --no-pager -n 120 ;;
   all)
     echo "########## presence ledger ##########"; ledger_stats
     echo; echo "########## billing ($inst) ##########"; "$BILLING" --instance "$inst" || true
-    echo; echo "########## meter journal (tail) ##########"; journalctl -u "$UNIT" --no-pager -n 40 ;;
+    echo; echo "########## meter journal (tail) ##########"; journalctl -u "$UNIT" --no-pager -n 40
+    echo; echo "########## attribution observer ##########"; observer_tail || true
+    echo; echo "########## player identities ##########"; identities_report || true ;;
   *) usage ;;
 esac

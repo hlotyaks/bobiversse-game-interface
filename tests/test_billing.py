@@ -24,8 +24,20 @@ BASE = datetime(2026, 7, 18, 20, 0, 0, tzinfo=UTC)
 
 
 def samples(rows):
-    """rows: list of (minute_offset, [logins]) -> ledger sample dicts."""
-    return [{"ts_dt": BASE + timedelta(minutes=m), "instance": "enshrouded-primary", "present": sorted(p)} for m, p in rows]
+    """rows: (minute_offset, [logins]) or (minute_offset, [logins], count) -> ledger sample dicts.
+
+    A 2-tuple omits ``count`` entirely, standing in for a pre-2026-08 ledger record; a 3-tuple
+    supplies the game's own client count, with ``None`` meaning the meter was blind that cycle.
+    """
+    out = []
+    for row in rows:
+        m, present = row[0], row[1]
+        sample = {"ts_dt": BASE + timedelta(minutes=m), "instance": "enshrouded-primary", "present": sorted(present)}
+        if len(row) > 2:
+            sample["count"] = row[2]
+            sample["count_known"] = row[2] is not None
+        out.append(sample)
+    return out
 
 
 def report(rows, rate=3600.0, interval=60, max_gap=150):
@@ -168,3 +180,64 @@ class MonthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthoritativeCountTests(unittest.TestCase):
+    """The game's own client count -- not how many of them we named -- sets the group size.
+
+    Regression cover for the 2026-08 mis-billing: Enshrouded logged three connected clients for
+    ~2.3h on 2026-08-23 while the meter could name at most one, and billing read the short
+    ``present`` list as solo play and applied the m(1)=1.5 premium.
+    """
+
+    def test_group_of_three_is_not_billed_as_solo_when_only_one_is_named(self) -> None:
+        result = report([(0, ["alice"], 3), (1, [], 0)])
+        alice = result["users"]["alice"]
+        # 60s in a group of three: m(3)=1.0 split three ways, not m(1)=1.5 to alice alone.
+        self.assertAlmostEqual(alice["charge"], 60.0 * 1.0 / 3, places=2)
+        self.assertEqual(alice["solo_hours"], 0.0)
+        self.assertAlmostEqual(alice["group_hours"], 60.0 / 3600.0, places=3)
+
+    def test_unnamed_players_are_reported_not_hidden(self) -> None:
+        totals = report([(0, ["alice"], 3), (1, [], 0)])["totals"]
+        # Two of the three clients went unnamed for the full 60s interval.
+        self.assertAlmostEqual(totals["unattributed_player_hours"], 2 * 60.0 / 3600.0, places=3)
+        self.assertAlmostEqual(totals["unbilled"], 2 * 60.0 * 1.0 / 3, places=2)
+
+    def test_a_blind_cycle_is_not_read_as_nobody_playing(self) -> None:
+        totals = report([(0, [], None), (1, [], 0)])["totals"]
+        self.assertAlmostEqual(totals["meter_blind_hours"], 60.0 / 3600.0, places=3)
+        self.assertEqual(totals["actual_cost"], 0.0)
+        self.assertEqual(totals["charged"], 0.0)
+
+    def test_legacy_records_without_a_count_keep_the_old_reading(self) -> None:
+        # A 2-tuple writes no "count" key at all, as pre-2026-08 ledger lines have.
+        alice = report([(0, ["alice"]), (1, [], 0)])["users"]["alice"]
+        self.assertAlmostEqual(alice["charge"], 60.0 * 1.5, places=2)
+        self.assertAlmostEqual(alice["solo_hours"], 60.0 / 3600.0, places=3)
+
+    def test_count_never_shrinks_the_group_below_who_was_named(self) -> None:
+        # ledger_admin --remove-login can leave count > len(present); the reverse would be a bug,
+        # and must not divide a charge by fewer people than the ledger actually names.
+        alice = report([(0, ["alice", "bob"], 1), (1, [], 0)])["users"]["alice"]
+        self.assertAlmostEqual(alice["charge"], 60.0 * 1.2 / 2, places=2)
+
+
+class LedgerCountFieldTests(unittest.TestCase):
+    def test_load_ledger_reads_and_validates_count(self) -> None:
+        import json, tempfile
+        rows = [
+            {"ts": "2026-08-23T19:11:00Z", "instance": "i", "present": ["a"], "count": 3},
+            {"ts": "2026-08-23T19:12:00Z", "instance": "i", "present": [], "count": None},
+            {"ts": "2026-08-23T19:13:00Z", "instance": "i", "present": ["a"]},
+            {"ts": "2026-08-23T19:14:00Z", "instance": "i", "present": [], "count": "3"},
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+            path = Path(fh.name)
+        loaded = BILLING.load_ledger(path, instance="i")
+        path.unlink()
+        self.assertEqual([s["count"] for s in loaded], [3, None, None, None])
+        # Only the explicit null and the malformed string are "blind"; a missing key is legacy.
+        self.assertEqual([s["count_known"] for s in loaded], [True, False, True, False])

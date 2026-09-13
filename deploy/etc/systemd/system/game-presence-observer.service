@@ -1,0 +1,43 @@
+[Unit]
+Description=Game Server Interface presence-attribution observer (diagnostic, read-only)
+Documentation=file:///usr/local/libexec/game-server-interface/observe-presence.py
+After=game-presence-meter.service tailscaled.service docker.service
+Wants=tailscaled.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Diagnostic companion to game-presence-meter.service. It runs the meter's own attribution code
+# WITHOUT writing to the presence ledger, and records what the meter saw: the game's client count,
+# every tailnet peer's byte counters and derived kbps/EWMA, who attribution would name, and the
+# conntrack flows on the game port.
+#
+# Why it exists: the meter's "who is playing" half has failed silently three times, and each time
+# the evidence only existed while the failure was happening. On 2026-08-23 Enshrouded logged three
+# connected clients for 2.3h and the ledger recorded nobody, with nothing in any log to say so.
+# This keeps the evidence so a failure can be diagnosed from history instead of re-staged live.
+#
+# Cheap by construction: only cycles carrying information are recorded (someone connected, the
+# occupancy read failed, a client went unnamed) plus a heartbeat every 20th cycle, so an idle
+# server writes ~150 records a day. Purely read-only -- it never touches the ledger or the game.
+ExecStart=/usr/local/libexec/game-server-interface/observe-presence.py \
+    --instance enshrouded-primary --template enshrouded --port 15636 \
+    --interval 30 --heartbeat 20 \
+    --log-jsonl /var/lib/game-server-interface/presence-observer.jsonl
+Restart=on-failure
+RestartSec=30s
+Nice=15
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+# The observer log lives beside the ledger; the docker socket is read for the game's client count.
+ReadWritePaths=/var/lib/game-server-interface /run/docker.sock
+# conntrack -L needs CAP_NET_ADMIN. It is the cross-check that may replace bandwidth ranking
+# entirely (see docs/presence-source-conntrack-findings.md), so the observer must be able to run it.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

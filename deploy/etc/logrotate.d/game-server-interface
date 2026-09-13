@@ -14,3 +14,17 @@
         /usr/bin/chattr +a /var/log/game-server-interface/audit.jsonl 2>/dev/null || true
     endscript
 }
+
+# Diagnostic observer log (game-presence-observer.service). Same sensitivity as the presence
+# ledger it sits beside -- playtime metadata -- so it rotates at 0600, root-owned. Kept longer
+# than the audit log because its whole purpose is answering "what did the meter see back then".
+/var/lib/game-server-interface/presence-observer.jsonl {
+    weekly
+    rotate 16
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0600 root root
+    copytruncate
+}

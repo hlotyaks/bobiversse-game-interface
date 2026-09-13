@@ -5,7 +5,12 @@ This is a pure calculator over a *presence ledger* -- an append-only JSONL file 
 samples produced by ``tools/presence_meter.py``. Each ledger line records who was present on
 one instance at one instant::
 
-    {"ts": "2026-07-18T20:00:00Z", "instance": "enshrouded-primary", "present": ["alice@ex", "bob@ex"]}
+    {"ts": "2026-07-18T20:00:00Z", "instance": "enshrouded-primary",
+     "present": ["alice@ex", "bob@ex"], "count": 2}
+
+``count`` is the game's own connected-client count and ``present`` is only who the meter could put
+a name to, so ``count >= len(present)``. The group-size multiplier keys off ``count``: a group of
+three must not be billed at the solo premium just because only one of the three was identified.
 
 No money is moved here. Given a nominal per-instance run-cost and the group-size multiplier
 schedule (``billing.yaml``), it reports how many hours each user played and when, how much was
@@ -97,10 +102,17 @@ def load_ledger(path: Path, instance: str | None = None) -> list[dict[str, Any]]
             ts_dt = parse_ts(str(record["ts"]))
         except ValueError:
             continue
+        # ``count`` is the game's own connected-client count (added 2026-08). It may exceed
+        # len(present) when the meter could not put a name to every client, and is absent on
+        # records written before the field existed -- None then means "trust len(present)".
+        raw_count = record.get("count")
+        count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0 else None
         samples.append({
             "ts_dt": ts_dt,
             "instance": record["instance"],
             "present": sorted({str(p) for p in present if isinstance(p, str) and p}),
+            "count": count,
+            "count_known": "count" not in record or count is not None,
         })
     return samples
 
@@ -134,6 +146,9 @@ def compute_report(
     total_charged = 0.0
     actual_cost = 0.0
     server_up_s = 0.0
+    unattributed_s = 0.0
+    unbilled = 0.0
+    blind_s = 0.0
 
     for index, sample in enumerate(ordered):
         ts = sample["ts_dt"]
@@ -143,7 +158,15 @@ def compute_report(
         else:
             duration = sample_interval_s
         present = sample["present"]
-        n = len(present)
+        identified = len(present)
+        if not sample.get("count_known", True):
+            # The meter could not read the game's occupancy this cycle. An empty ``present`` here
+            # means "we were blind", not "nobody played" -- bill nothing and account for the gap.
+            blind_s += duration
+            continue
+        # Group size is what the *game* reported, not how many of them we managed to name. Using
+        # len(present) here is what charged a three-player evening at the m(1) solo premium.
+        n = max(sample["count"], identified) if sample.get("count") is not None else identified
         if n >= 1:
             server_up_s += duration
             actual_cost += rate_per_sec * duration
@@ -158,6 +181,12 @@ def compute_report(
             else:
                 user["group_seconds"] += duration
             total_charged += charge
+        # Players the game counted but the meter could not name. Their share goes unbilled; both
+        # numbers are reported so a shortfall shows up on the bill instead of hiding in the kitty.
+        unnamed = n - identified
+        if unnamed > 0:
+            unattributed_s += duration * unnamed
+            unbilled += rate_per_sec * duration * m * unnamed / n
 
         # Close sessions for anyone who just dropped out, then open/extend for the present.
         for login in [login for login in open_sessions if login not in present]:
@@ -210,6 +239,9 @@ def compute_report(
             "kitty": round(total_charged - actual_cost, 2),
             "player_hours": round(total_play_s / 3600.0, 3),
             "solo_share_pct": round(100.0 * total_solo_s / total_play_s, 1) if total_play_s else 0.0,
+            "unattributed_player_hours": round(unattributed_s / 3600.0, 3),
+            "unbilled": round(unbilled, 2),
+            "meter_blind_hours": round(blind_s / 3600.0, 3),
         },
     }
 
@@ -241,6 +273,17 @@ def render_text(report: dict[str, Any], instance: str) -> str:
         f"  actual cost: {currency} {totals['actual_cost']:.2f}   "
         f"charged: {currency} {totals['charged']:.2f}   "
         f"kitty: {currency} {totals['kitty']:.2f}",
+    ]
+    # Surface the meter's own shortfall on the bill. Silence here is what let a three-player
+    # session be billed as one person's solo play for a month without anyone noticing.
+    if totals.get("unattributed_player_hours"):
+        lines.append(
+            f"  UNATTRIBUTED: {_hours(totals['unattributed_player_hours'])} of play the game counted "
+            f"but the meter could not name ({currency} {totals['unbilled']:.2f} unbilled)"
+        )
+    if totals.get("meter_blind_hours"):
+        lines.append(f"  METER BLIND: {_hours(totals['meter_blind_hours'])} with no occupancy reading (not billed)")
+    lines += [
         "",
         "  (Dry run -- no money is charged. The kitty is the surplus from solo premiums that",
         "   funds group discounts and fixed costs; it should net out over time.)",

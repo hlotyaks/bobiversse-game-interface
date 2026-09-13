@@ -137,3 +137,49 @@ class ExclusionRouteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BillingIdentityResolutionTests(unittest.TestCase):
+    """Bill lines are keyed by in-game name; the viewer is known by their tailnet login.
+
+    The dashboard identifies people from the Tailscale-User-Login header, so once the ledger began
+    naming players by their in-game name a direct key lookup stopped matching anyone. The controller
+    annotates each line with the login it belongs to; this resolves the viewer through it.
+    """
+
+    REPORT = {
+        "instance": "enshrouded-primary", "month": "2026-09", "currency": "USD",
+        "users": {
+            "SomeCharacter": {"hours": 2.0, "charge": 0.3, "login": "cbrinton@gmail.com"},
+            "Gronk": {"hours": 1.0, "charge": 0.1, "login": "jay@ex"},
+            "Talian": {"hours": 0.5, "charge": 0.05},
+        },
+        "totals": {"player_count": 3, "kitty": 0.1},
+    }
+
+    def test_a_player_sees_their_own_line_via_their_login(self) -> None:
+        view = MODULE.filter_billing_for_actor(self.REPORT, "cbrinton@gmail.com", is_admin=False)
+        self.assertEqual(view["you"]["hours"], 2.0)
+
+    def test_a_player_without_a_mapped_login_sees_no_line_but_leaks_nothing(self) -> None:
+        # Talian has no login mapped: no personal line, and still no view of anyone else's.
+        view = MODULE.filter_billing_for_actor(self.REPORT, "someone@ex", is_admin=False)
+        self.assertIsNone(view["you"])
+        self.assertNotIn("users", view)
+        self.assertNotIn("totals", view)
+
+    def test_non_admins_never_receive_other_players_lines(self) -> None:
+        view = MODULE.filter_billing_for_actor(self.REPORT, "jay@ex", is_admin=False)
+        self.assertEqual(view["you"]["hours"], 1.0)
+        self.assertNotIn("users", view)
+
+    def test_admins_still_see_the_full_table(self) -> None:
+        view = MODULE.filter_billing_for_actor(self.REPORT, "cbrinton@gmail.com", is_admin=True)
+        self.assertEqual(set(view["users"]), {"SomeCharacter", "Gronk", "Talian"})
+        self.assertEqual(view["totals"]["player_count"], 3)
+
+    def test_a_legacy_report_keyed_by_login_still_resolves(self) -> None:
+        # Ledger rows written before game-name identities name players by login.
+        legacy = {"users": {"alice@ex": {"hours": 1.0}}, "totals": {}}
+        view = MODULE.filter_billing_for_actor(legacy, "alice@ex", is_admin=False)
+        self.assertEqual(view["you"]["hours"], 1.0)

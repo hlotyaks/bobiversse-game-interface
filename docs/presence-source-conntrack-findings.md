@@ -28,7 +28,32 @@ With a friend actively in the Enshrouded world:
   - the game container reaching Steam — `src=172.19.0.2 … dport=270xx`,
   - LAN/DNS/SSDP noise.
 
-## Why conntrack cannot see it
+## Correction (2026-08-27): right conclusion, wrong reason -- and the actual cause
+
+The conclusion in this section -- that Tailscale-delivered traffic produces no conntrack entries --
+was over-generalised from a single negative result, and it is what pushed the meter onto the
+bandwidth-ranking heuristic that has since mis-billed three separate ways. Measured on bobiverse
+on 2026-08-27, conntrack **does** track decrypted tailnet traffic:
+
+    # conntrack -L -s 100.64.0.0/10
+    tcp 6 431993 ESTABLISHED src=100.93.220.3 dst=100.84.161.38 sport=52340 dport=22 ...
+
+That is an SSH session arriving over `tailscale0`, tracked normally. Packets injected into the TUN
+device traverse netfilter like any other. So "conntrack is blind under Tailscale" is not a property
+of Tailscale delivery.
+
+**The narrower claim, however, holds.** Re-tested on 2026-08-27 with a player connected and in the
+world for ~8 minutes: across every observer cycle of that session the game reported one client and
+`conntrack -L -p udp --dport 15636` returned **0 flows**, every time. Docker publishes the port
+through the userland proxy (`docker-proxy -proto udp -host-ip 100.84.161.38 -host-port 15636`), so
+the client's packets terminate on that socket and never become a trackable `client -> game-port`
+tuple. So conntrack is **not** a usable identity source for this deployment -- not because Tailscale
+hides the traffic, which it does not, but because of how the game port is published.
+
+Net: the original conclusion was right for the wrong reason. Do not revive `--source conntrack`
+here on the strength of the SSH evidence above.
+
+## Why conntrack cannot see it (superseded -- see the correction above)
 
 Players connect over the tailnet, so their game packets travel **inside the encrypted WireGuard
 tunnel** (the `41641↔41641` UDP flows are all conntrack sees). `tailscaled` decrypts them and
@@ -40,6 +65,78 @@ the conntrack layer — the traffic simply never appears there as a trackable cl
 
 This is not fixable by changing the watched port or filter. It is a property of Tailscale-tunnelled
 delivery.
+
+> **Superseded.** The final sentence is false as written -- see the 2026-08-27 correction above.
+> Tailnet traffic *is* conntrack-tracked; only the UDP-to-game-port case is still open.
+
+## Settled (2026-09-09): players never touch the tailnet, and the game logs their identity
+
+A packet capture with a client connected and in the world ended the whole line of investigation:
+
+    # tcpdump -i tailscale0 -n 'udp port 15636 or udp port 15637'      (12s, client connected)
+    0 packets captured
+
+SSH traffic to `100.84.161.38:22` is plainly visible on the same interface in the same capture
+window, so this is not a capture problem. **The published game port receives no traffic at all.**
+
+Enshrouded uses Steam's relay network (SDR). The server makes an *outbound* connection to Steam and
+clients reach it through Steam's relays, so there is no inbound `client -> game-port` flow on any
+interface — not on `tailscale0`, not in conntrack, not anywhere. Every identity source tried here
+(conntrack flows, peer byte rate, peer `LastWrite`) was looking for traffic that does not exist.
+The game log confirms the mechanism directly:
+
+    [online] Server connected to Steam successfully
+    [online] Server SteamId: 90291470795212813
+    [online] Session accepted with peer (steamid:76561190000000005)
+
+**And that last line is the identity source.** Enshrouded logs a Steam ID for every connecting
+peer, plus matching `Removed peer` / `Timeout for peer` events. Replaying them yields exactly who
+is connected — validated against a full 2-week container log: 64 events, one live handle, matching
+the game's own occupancy count. This retires the premise the whole feature was built on ("game
+servers here do not log player identity"), which was simply never checked.
+
+Attribution now reads that log (`--attribution game-log`) and maps Steam ID to tailnet login via an
+admin-maintained file. The sections below are kept as a record of what was ruled out and why.
+
+## What breaks the tailnet heuristics: byte counters are direct-path only (2026-08-27)
+
+`tailscale status --json` populates `RxBytes`/`TxBytes` **only for peers with an established direct
+path**. A DERP-relayed peer reads `0` no matter how much game traffic it is exchanging. Measured on
+bobiverse with one player in the world and five other peers online or recently seen:
+
+| login | path | Rx+Tx | LastWrite | LastHandshake |
+| --- | --- | --- | --- | --- |
+| cbrinton@… (playing) | direct `67.80.83.53:41641` | 6,686,432 | 0s ago | 108s ago |
+| hlotyaks@… | DERP | **0** | 127094s ago | never |
+| player-c@… | DERP | **0** | 251764s ago | never |
+| player-b@… | DERP | **0** | 396448s ago | never |
+| player-e@… | DERP | **0** | 129421s ago | never |
+| player-d@… | DERP | **0** | 318527s ago | never |
+
+Since attribution ranks peers by byte *rate* and drops anything at or below a 1.0 kbps floor, every
+DERP-relayed player is invisible to it — which is why the 2026-08-23 session logged three connected
+clients for 2.3h and the ledger recorded `present: []` throughout. Note `jxdaugherty`'s `LastWrite`
+of 396448s: that is ~4.6 days before the measurement, landing on that very session. The engine was
+writing packets to that peer; the byte counters simply never reflected it.
+
+**`LastWrite` is the promising replacement signal.** It is when the local engine last sent the peer
+a packet, it is populated for DERP peers, and it is *not* refreshed by mere presence — `hlotyaks`
+was online at the time of measurement with a `LastWrite` 35 hours stale. So "the N peers written to
+most recently" should name exactly the game's N connected clients, where "the N busiest peers by
+byte rate" structurally cannot.
+
+**Superseded on 2026-09-09** by `--attribution game-log` (see above): write-recency is also
+direct-path only, so it was blind to relayed peers in exactly the way byte rate was. It was briefly
+the default after being **switched on 2026-08-27**. Enshrouded is a
+test bed for the metering process rather than a live billing system, so the cost of adopting the
+better-supported signal immediately is nil, while leaving relayed players unnameable would have
+kept collecting data with a known hole in it. `--attribution byte-rate` restores the old ranking,
+and `scripts/observe-presence.py` now shadow-logs it every cycle (`attributed_by_byte_rate`) so the
+two stay comparable and a regression stays visible.
+
+Still worth confirming on a real multi-player session: the DERP case has been reasoned from peer
+state, not yet watched with two people connected. Expect the observer to print `DIFFERS` there, with
+byte-rate naming too few.
 
 ## The working source (tailscale)
 

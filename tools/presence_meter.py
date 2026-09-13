@@ -10,11 +10,11 @@ record ``{"ts", "instance", "present": [logins]}`` and differ only in how they o
   ``client -> game-port`` flow (verified 2026-07-18 -- see docs/presence-source-conntrack-findings.md).
   How many clients are connected comes from the game itself when we can read it (Enshrouded logs a
   per-machine ``OperatingNormally`` block every ~30s); *who* they are comes from ``tailscale status
-  --json``, attributing the reported client count to the busiest tailnet peers. Real per-client game
-  traffic is far below any usable bandwidth threshold, so the game's own count -- not a kbps cutoff
-  -- is what distinguishes a player from someone merely idling on the tailnet. Games without an
-  occupancy reader fall back to the ``--min-kbps`` traffic-rate heuristic. Attribution is gated to
-  instances whose systemd unit is active.
+  --json``, attributing that count to the peers the engine wrote to most recently (``LastWrite``).
+  Write-recency replaced byte-rate ranking on 2026-08-27: ``RxBytes``/``TxBytes`` are populated only
+  for peers with a direct path, so every DERP-relayed player read 0 and was invisible to
+  attribution. Games without an occupancy reader still fall back to the ``--min-kbps`` traffic-rate
+  heuristic. Attribution is gated to instances whose systemd unit is active.
 
 - ``conntrack`` (for a future cloud / public-IP deployment *without* Tailscale): when clients
   connect directly to the published UDP port, ``conntrack -L`` shows their source addresses and we
@@ -56,6 +56,22 @@ DEFAULT_ATTRIBUTION_FLOOR_KBPS = 1.0
 # 0.5 keeps a real player ranked ahead of an idle peer's one-cycle burst or the player's own
 # transient tailscale counter reset (both observed misattributing a solo slot on 2026-07-19).
 DEFAULT_RATE_SMOOTHING = 0.5
+# Identity signal.
+#   "game-log"   -- the game names its own connected players (Enshrouded logs a Steam ID per peer).
+#                   Exact, and the only source that works at all here: players connect over Steam's
+#                   relay network, so the tailnet never carries their game traffic.
+#   "last-write" / "byte-rate" -- superseded tailnet heuristics, kept so the old behaviour stays
+#                   reachable and testable. Both are blind to DERP-relayed peers, and neither ever
+#                   had a chance against Steam-relayed play. See docs/usage-metering.md.
+DEFAULT_ATTRIBUTION = "game-log"
+# A peer not written to within this many seconds is not exchanging traffic with the host and cannot
+# be one of the game's connected clients. Two meter cycles, so a single jittery sample cannot drop
+# a player who is plainly still connected.
+DEFAULT_MAX_WRITE_AGE_S = 120.0
+# How far back to replay the game log when reconstructing who is connected. Must comfortably exceed
+# the longest plausible single session: a player whose "Added peer" fell outside the window is not
+# named (and shows up as UNATTRIBUTED), never misattributed.
+DEFAULT_IDENTITY_WINDOW = "24h"
 
 
 # --------------------------------------------------------------------------- shared
@@ -191,6 +207,81 @@ def attribute_by_count(ranked: list[tuple[float, str]], count: int, floor_kbps: 
     return sorted(login for rate, login in ranked[:count] if rate > floor_kbps)
 
 
+def parse_peer_paths(status: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per-login connection path and write-recency from ``tailscale status --json``.
+
+    Devices under one login collapse to the *most recently written* one, matching how
+    ``parse_status_peers`` merges them.
+
+    ``LastWrite`` is when the local engine last sent this peer a packet. It is the identity signal
+    because it is populated for every peer, where ``RxBytes``/``TxBytes`` are populated **only for
+    peers with an established direct path** -- a DERP-relayed peer reads 0 however much game traffic
+    it is exchanging. Ranking by byte rate therefore could not see a relayed player at all, which is
+    why 2026-08-23 logged three connected clients for 2.3h against a ledger that named nobody. It is
+    also not refreshed by mere presence: an online but idle peer measured 35 hours stale while a
+    player read 0s, so recency genuinely separates playing from lurking.
+    """
+    now_dt = datetime.now(UTC)
+
+    def age_seconds(value: Any) -> float | None:
+        # Tailscale writes the zero time as "0001-01-01T00:00:00Z" for "never".
+        if not isinstance(value, str) or value.startswith("0001"):
+            return None
+        try:
+            return (now_dt - datetime.fromisoformat(value.replace("Z", "+00:00"))).total_seconds()
+        except ValueError:
+            return None
+
+    users = status.get("User") or {}
+    paths: dict[str, dict[str, Any]] = {}
+    for node in (status.get("Peer") or {}).values():
+        if not isinstance(node, dict):
+            continue
+        profile = users.get(str(node.get("UserID"))) if isinstance(users, dict) else None
+        login = profile.get("LoginName") if isinstance(profile, dict) else None
+        if not login:
+            continue
+        entry = {
+            "direct": bool(node.get("CurAddr")),
+            "relay": node.get("Relay") or None,
+            "online": bool(node.get("Online")),
+            "last_write_s": age_seconds(node.get("LastWrite")),
+            "last_handshake_s": age_seconds(node.get("LastHandshake")),
+        }
+        current = paths.get(login)
+        if current is None:
+            paths[login] = entry
+            continue
+        previous_age, new_age = current["last_write_s"], entry["last_write_s"]
+        if previous_age is None or (new_age is not None and new_age < previous_age):
+            paths[login] = entry
+    return paths
+
+
+def attribute_by_write_recency(paths: dict[str, dict[str, Any]], count: int, max_age_s: float,
+                               excluded: frozenset[str] = frozenset()) -> list[str]:
+    """Assign the game's ``count`` connected clients to the peers written to most recently.
+
+    A peer the engine has not written to within ``max_age_s`` is not exchanging traffic with this
+    host and cannot be one of the connected clients, so it is never selected -- we would rather
+    under-report than bill the wrong person. Ranking is purely by recency: byte rate is deliberately
+    *not* used as a tiebreak, because a DERP-relayed player's byte counters read 0 and would lose
+    every tie to a direct-path peer with an idle SSH session.
+
+    Where this is still ambiguous -- an administrator whose dashboard or SSH traffic is written just
+    as recently as a player's game traffic -- the per-game exclusion list is the remedy, applied by
+    the caller before selection.
+    """
+    if count <= 0:
+        return []
+    fresh = [(info["last_write_s"], login) for login, info in paths.items()
+             if login not in excluded
+             and info.get("last_write_s") is not None
+             and info["last_write_s"] <= max_age_s]
+    fresh.sort()
+    return sorted(login for _, login in fresh[:count])
+
+
 def enshrouded_client_count(log_text: str) -> int | None:
     """Connected-client count from the most recent *complete* Enshrouded ``Machines:`` block.
 
@@ -217,6 +308,93 @@ def enshrouded_client_count(log_text: str) -> int | None:
 # template_id -> function(container log text) -> connected client count (or None if unknown).
 OCCUPANCY_READERS = {"enshrouded": enshrouded_client_count}
 
+# Enshrouded's online subsystem logs an identity for every client, which is the identity source:
+#   [online] Added peer 0(23) (steamid:76561190000000005)
+#   [online] Removed peer 0(23)          / [online] Timeout for peer 0(23)
+# Peer handles are unique per session (verified over a full container log: no handle is reused), so
+# replaying add/drop events yields exactly who is connected now.
+ENSHROUDED_PEER_ADD = re.compile(r"\[online\] Added peer (\S+) \(steamid:(\d+)\)")
+ENSHROUDED_PEER_DROP = re.compile(r"\[online\] (?:Removed peer|Timeout for peer) (\S+)")
+
+
+def enshrouded_connected_players(log_text: str) -> list[str]:
+    """Steam IDs currently connected, by replaying the game's own peer add/drop events.
+
+    This is the identity source the earlier network heuristics were a substitute for. The premise
+    they were built on -- "Enshrouded does not log player identity" -- was simply wrong: it logs a
+    Steam ID on every connect. Players reach the server over Steam's relay network, not the tailnet
+    (the published UDP port receives no packets at all), so no network-layer source could ever have
+    seen them; see docs/presence-source-conntrack-findings.md.
+
+    Replay is over whatever window the caller read, so a session that began before that window looks
+    absent. That under-reports rather than misattributes, and the occupancy count -- read separately
+    from the game's own Session block -- still reflects them, so the shortfall surfaces on the bill
+    as UNATTRIBUTED instead of hiding.
+    """
+    live: dict[str, str] = {}
+    for line in log_text.splitlines():
+        added = ENSHROUDED_PEER_ADD.search(line)
+        if added:
+            live[added.group(1)] = added.group(2)
+            continue
+        dropped = ENSHROUDED_PEER_DROP.search(line)
+        if dropped:
+            live.pop(dropped.group(1), None)
+    return sorted(set(live.values()))
+
+
+# template_id -> function(container log text) -> list of in-game player IDs currently connected.
+IDENTITY_READERS = {"enshrouded": enshrouded_connected_players}
+
+
+def has_identity_reader(template_id: str) -> bool:
+    """Whether this game names its own connected players in its log."""
+    return template_id in IDENTITY_READERS
+
+
+def instance_connected_players(template_id: str, container: str, docker_bin: str, window: str) -> list[str] | None:
+    """In-game player IDs currently connected, or None if the game log could not be read."""
+    reader = IDENTITY_READERS.get(template_id)
+    if reader is None:
+        return None
+    logs = read_container_logs(container, docker_bin, since=window)
+    return reader(logs) if logs else None
+
+
+def load_player_identities(path: Path) -> dict[str, dict[str, str]]:
+    """Load the admin-managed player map: ``{"identities": {game_id: {"name", "login"}}}``.
+
+    ``name`` is the billing identity -- the in-game name the group knows each other by, which is
+    what appears on the bill. ``login`` is that person's tailnet login, carried only so the
+    dashboard can tell which line belongs to the viewer (it identifies people by the
+    ``Tailscale-User-Login`` header); it is optional, and a player without one is billed normally
+    but cannot be shown their own line.
+
+    A value may also be a bare string, taken as the name with no login. A missing or malformed file
+    yields no mapping, which leaves every player unattributed rather than guessed -- the count still
+    comes from the game, so the bill reports the gap instead of charging the wrong person. Read
+    fresh each cycle so an admin's edit applies on the next sample with no restart.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    mapping = raw.get("identities") if isinstance(raw, dict) else None
+    if not isinstance(mapping, dict):
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for game_id, value in mapping.items():
+        if isinstance(value, str):
+            name, login = value, ""
+        elif isinstance(value, dict):
+            name = value.get("name") if isinstance(value.get("name"), str) else ""
+            login = value.get("login") if isinstance(value.get("login"), str) else ""
+        else:
+            continue
+        if name:
+            result[str(game_id)] = {"name": name, "login": login}
+    return result
+
 
 def read_container_logs(container: str, docker_bin: str, since: str = "120s") -> str:
     """Return recent combined stdout+stderr for a container (empty string on any failure)."""
@@ -231,12 +409,30 @@ def read_container_logs(container: str, docker_bin: str, since: str = "120s") ->
 
 
 def instance_client_count(template_id: str, container: str, docker_bin: str) -> int | None:
-    """Game-authoritative connected-client count for an instance, or None if we can't tell."""
+    """Game-authoritative connected-client count for an instance, or None if we can't tell.
+
+    ``None`` here means *unknown*, and callers must not confuse it with *nobody*. Note the two
+    distinct reasons it can be None: the template has no occupancy reader at all (see
+    ``has_occupancy_reader``), or it has one but the read failed / the logs held no complete
+    block. Only the first justifies falling back to the bandwidth heuristic.
+    """
     reader = OCCUPANCY_READERS.get(template_id)
     if reader is None:
         return None
     logs = read_container_logs(container, docker_bin)
     return reader(logs) if logs else None
+
+
+def has_occupancy_reader(template_id: str) -> bool:
+    """Whether this game reports its own connected-client count.
+
+    Gates the ``--min-kbps`` fallback. For a game that *does* report occupancy, a failed read is
+    an unknown, not an invitation to guess by bandwidth: the fallback ranks whoever is pushing the
+    most tailnet traffic, which on this host is an admin's SSH or dashboard session, and it was
+    silently billing them for solo play the game never saw (observed 2026-08, see
+    docs/usage-metering.md).
+    """
+    return template_id in OCCUPANCY_READERS
 
 
 def load_exclusions(exclusions_path: Path) -> dict[str, frozenset[str]]:
@@ -275,16 +471,21 @@ def instance_templates(catalog: dict[str, Any]) -> dict[str, str]:
     return mapping
 
 
-def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS, alpha: float = DEFAULT_RATE_SMOOTHING, exclude_logins: frozenset[str] = frozenset(), template_exclusions: dict[str, frozenset[str]] | None = None) -> None:
+def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bin: str, systemctl_bin: str, docker_bin: str, state: dict[str, Any], min_kbps: float, floor_kbps: float = DEFAULT_ATTRIBUTION_FLOOR_KBPS, alpha: float = DEFAULT_RATE_SMOOTHING, exclude_logins: frozenset[str] = frozenset(), template_exclusions: dict[str, frozenset[str]] | None = None, attribution: str = DEFAULT_ATTRIBUTION, max_write_age_s: float = DEFAULT_MAX_WRITE_AGE_S, identities: dict[str, str] | None = None, identity_window: str = DEFAULT_IDENTITY_WINDOW) -> None:
     status_raw = _run([tailscale_bin, "status", "--json"])
     try:
-        peers = parse_status_peers(json.loads(status_raw)) if status_raw else {}
+        status = json.loads(status_raw) if status_raw else {}
     except json.JSONDecodeError:
-        peers = {}
+        status = {}
+    if not isinstance(status, dict):
+        status = {}
+    peers = parse_status_peers(status)
+    paths = parse_peer_paths(status)
     # Global exclusions (--exclude-login): logins that are never a player of *any* game (e.g. a
     # monitoring bot). Drop them entirely before attribution so they can't be ranked into any slot.
     if exclude_logins:
         peers = {login: info for login, info in peers.items() if login not in exclude_logins}
+        paths = {login: info for login, info in paths.items() if login not in exclude_logins}
     now_mono = time.monotonic()
     dt = (now_mono - state["t"]) if state.get("t") is not None else 0.0
     previous_bytes = state.get("bytes", {})
@@ -292,25 +493,52 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
     ranked = rank_by_smoothed_rate(ewma)
     templates = instance_templates(catalog)
     template_exclusions = template_exclusions or {}
+    identities = identities or {}
     for key in instance_ports(catalog):
-        if not is_unit_active(key, systemctl_bin):
-            present: list[str] = []
-        else:
+        present: list[str] = []
+        count: int | None = 0
+        if is_unit_active(key, systemctl_bin):
             template_id = templates.get(key, "")
             # Per-game exclusions: a login that is a non-player of *this* game (a server admin who
             # never plays Enshrouded but does play others). Applied per instance, not globally, so
             # the same login can still be attributed to a different game. Excluding before selection
             # means the slot passes to the next real player rather than being spent on a non-player.
             excluded = template_exclusions.get(template_id, frozenset())
-            count = instance_client_count(template_id, f"game-{key}", docker_bin)
-            if count is not None:
-                # Game-authoritative occupancy: attribute the reported N clients to the busiest peers.
-                ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
-                present = attribute_by_count(ranked_for_instance, count, floor_kbps)
+            if has_occupancy_reader(template_id):
+                # Game-authoritative occupancy: how many clients the game itself reports. A failed
+                # read is recorded as an explicit unknown (count None) so the billing pass can skip
+                # the sample instead of reading an empty list as "nobody was playing".
+                count = instance_client_count(template_id, f"game-{key}", docker_bin)
+                if count is not None:
+                    if attribution == "game-log" and has_identity_reader(template_id):
+                        # The game names its own players. Translate its in-game IDs to tailnet
+                        # logins; an unmapped ID stays unnamed, so the shortfall against the game's
+                        # count reaches the bill as UNATTRIBUTED rather than being guessed at.
+                        connected = instance_connected_players(template_id, f"game-{key}", docker_bin, identity_window)
+                        # Match exclusions against the login as well as the in-game name: the
+                        # dashboard's Exclusions page validates entries as tailnet logins (they must
+                        # contain an "@"), so a name-only comparison would never match anything an
+                        # administrator can actually enter there.
+                        present = sorted({
+                            identities[pid]["name"] for pid in (connected or [])
+                            if pid in identities
+                            and identities[pid]["name"] not in excluded
+                            and (not identities[pid]["login"] or identities[pid]["login"] not in excluded)
+                        })
+                    elif attribution == "byte-rate":
+                        ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
+                        present = attribute_by_count(ranked_for_instance, count, floor_kbps)
+                    else:
+                        present = attribute_by_write_recency(paths, count, max_write_age_s, excluded)
             else:
                 # No game-occupancy reader for this template -- fall back to the rate threshold.
                 present = [login for login in playing_logins(peers, previous_bytes, dt, min_kbps) if login not in excluded]
-        append_ledger(ledger_path, {"ts": now(), "instance": key, "present": present})
+                count = len(present)
+        # ``count`` is the game's own player count; ``present`` is only who we could put a name to.
+        # Recording both keeps the two separable downstream: billing must charge the group rate for
+        # a group of N even when it could only identify one of them, and must never apply the solo
+        # premium to a sample the game says had three people in it.
+        append_ledger(ledger_path, {"ts": now(), "instance": key, "present": present, "count": count})
     state["bytes"] = {login: int(info["bytes"]) for login, info in peers.items()}
     state["rate_ewma"] = ewma
     state["t"] = now_mono
@@ -392,12 +620,29 @@ def main() -> int:
     parser.add_argument("--source", choices=["tailscale", "conntrack"], default="tailscale",
                         help="presence source (default tailscale; conntrack is for a future non-Tailscale deployment)")
     parser.add_argument("--min-kbps", type=float, default=DEFAULT_MIN_KBPS,
-                        help="tailscale source: minimum per-peer traffic rate to count as playing")
+                        help="tailscale source: minimum per-peer traffic rate to count as playing "
+                             "(only the fallback for games with no occupancy reader)")
+    parser.add_argument("--attribution", choices=["game-log", "last-write", "byte-rate"], default=DEFAULT_ATTRIBUTION,
+                        help="which signal names the game's connected clients. 'game-log' (default) "
+                             "reads the identities the game itself logs and is exact; 'last-write' "
+                             "and 'byte-rate' are superseded tailnet heuristics that cannot see "
+                             "players at all when the game relays through Steam.")
+    parser.add_argument("--max-write-age", type=float, default=DEFAULT_MAX_WRITE_AGE_S, metavar="SECONDS",
+                        help="last-write attribution: a peer not written to within this many seconds "
+                             "is never selected (default two meter cycles)")
     parser.add_argument("--interval", type=int, default=60, help="seconds between samples (0 = one cycle then exit)")
     parser.add_argument("--exclude-login", action="append", default=[], metavar="LOGIN",
                         help="tailscale login that is never a player of ANY game (e.g. a monitoring bot); "
                              "excluded from attribution globally. Repeatable. For a per-game non-player "
                              "(admin of one game), use the admin-managed --exclusions-file instead.")
+    parser.add_argument("--identities-file", type=Path, default=Path("/var/lib/game-server-interface/player-identities.json"),
+                        help="game-log attribution: map of in-game player ID (Steam ID) to the "
+                             "player's in-game name (the billing identity) and optional tailnet "
+                             "login, re-read every cycle. An unmapped player is counted but not "
+                             "named, so their share is reported as unattributed rather than guessed.")
+    parser.add_argument("--identity-window", default=DEFAULT_IDENTITY_WINDOW, metavar="DURATION",
+                        help="how far back to replay the game log to reconstruct who is connected "
+                             "(default 24h); must exceed the longest plausible session")
     parser.add_argument("--exclusions-file", type=Path, default=Path("/var/lib/game-server-interface/presence-exclusions.json"),
                         help="per-game exclusion map ({template_id: [logins]}), admin-edited via the "
                              "interface and re-read every cycle; missing file means no per-game exclusions.")
@@ -425,7 +670,8 @@ def main() -> int:
         else:
             # Read fresh each cycle so admin edits via the interface apply without a restart.
             template_exclusions = load_exclusions(args.exclusions_file)
-            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, args.docker_bin, state, args.min_kbps, exclude_logins=exclude_logins, template_exclusions=template_exclusions)
+            identities = load_player_identities(args.identities_file)
+            run_cycle_tailscale(catalog, args.ledger, args.tailscale_bin, args.systemctl_bin, args.docker_bin, state, args.min_kbps, exclude_logins=exclude_logins, template_exclusions=template_exclusions, attribution=args.attribution, max_write_age_s=args.max_write_age, identities=identities, identity_window=args.identity_window)
 
     if args.interval <= 0:
         cycle()

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "_comment": "Maps a game's in-game player ID to the person. 'name' is the billing identity -- the in-game name the group knows each other by -- and is what appears on the bill. 'login' is that person's tailnet login, used only so the dashboard can show someone their own line (it identifies viewers by the Tailscale-User-Login header); optional. Enshrouded logs a Steam ID per connected peer ([online] Added peer <handle> (steamid:N)). The meter re-reads this file every cycle, so edits apply within a minute with no restart. A player not listed here is still counted by the game but is not named, and their share is reported as UNATTRIBUTED rather than guessed. Discover unmapped IDs and their character names with: sudo /usr/local/sbin/gsi-diagnose identities",
+  "_privacy": "REAL PLAYER IDENTITIES ARE HOST STATE, NOT CODE. This repository is public. Fill in the live copy at /var/lib/game-server-interface/player-identities.json (root-owned, 0600) and never commit real Steam IDs, logins, or character names here.",
+  "_example": {
+    "76561190000000001": {"name": "SomeCharacter", "login": "someone@example.com"}
+  },
+  "identities": {}
+}
