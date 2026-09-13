@@ -146,16 +146,19 @@ def render_valheim(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
                 "stop_grace_period": "120s",
                 "environment": {
                     "SERVER_PORT": str(game_port),
-                    # Listed in Valheim's community server browser. This is not the belt-and-braces
-                    # choice it looks like the opposite of: Valheim carries gameplay over Steam's
-                    # relay, not the tailnet, so binding the ports to the tailnet IP does not gate
-                    # who can reach the game -- it only gates the A2S query. With SERVER_PUBLIC=0
-                    # and no crossplay, the image's own logic (see its valheim/common) leaves the
-                    # server unqueryable and undiscoverable, so nobody can join at all. Entry is
-                    # gated by SERVER_PASS; only the server's name is public.
-                    # The private alternative is CROSSPLAY=true, which swaps Steam's relay for
-                    # PlayFab's and issues a join code instead of listing the server.
-                    "SERVER_PUBLIC": "1",
+                    # Join by code over PlayFab's relay, not by address and not by server
+                    # browser. This is forced by the deployment, not a preference: the game ports
+                    # are published only on the host's tailnet IP, so Steam's master servers cannot
+                    # query the server from the public internet and will never list it -- making
+                    # SERVER_PUBLIC=1 register a server nobody can find. Valheim also carries
+                    # gameplay over a relay rather than the tailnet (a capture on tailscale0 during
+                    # a join attempt caught nothing), so the tailnet address is not a usable
+                    # connection path either. Crossplay needs no inbound reachability at all: the
+                    # server dials out and issues a join code, which the log prints on startup.
+                    # The alternative is publishing the ports on 0.0.0.0 with router forwarding,
+                    # which this project's firewall policy deliberately refuses.
+                    "CROSSPLAY": "true",
+                    "SERVER_PUBLIC": "0",
                     "PUID": uid,
                     "PGID": gid,
                     # The image chmods every entry in worlds_local with WORLDS_FILE_PERMISSIONS,
