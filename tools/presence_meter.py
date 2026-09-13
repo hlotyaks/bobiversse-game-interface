@@ -357,7 +357,7 @@ def enshrouded_connected_players(log_text: str) -> list[str]:
 # The ZDO owner id is therefore the only thing linking a departure to an arrival.
 VALHEIM_PLAYER_COUNT = re.compile(r", now (\d+) player\(s\)")
 VALHEIM_PLATFORM_ID = re.compile(r"received local Platform ID Steam_(\d+)")
-VALHEIM_CHARACTER = re.compile(r"Got character ZDOID from .+ : (\d+):\d+")
+VALHEIM_CHARACTER = re.compile(r"Got character ZDOID from (.+?) : (\d+):\d+")
 VALHEIM_ZDO_DESTROY = re.compile(r"Destroying abandoned [^:]*zdo \d+:\d+ owner (\d+)")
 
 
@@ -377,20 +377,29 @@ def valheim_client_count(log_text: str) -> int | None:
     return found
 
 
-def valheim_connected_players(log_text: str) -> list[str]:
+def valheim_connected_players(log_text: str, characters: dict[str, str] | None = None) -> list[str]:
     """Steam IDs currently connected, by replaying Valheim's arrival and departure lines.
 
-    A departure names only the ZDO owner id, so an arrival's Steam ID is bound to the owner id that
-    follows it. That pairing is only taken when exactly one arrival is waiting for a character:
-    two players joining at once could otherwise be transposed, and billing the wrong person is
-    worse than billing nobody -- an unpaired arrival is simply never named, and the game's own
-    count still reports them, so they surface as UNATTRIBUTED.
+    A departure names only the ZDO owner id, so an arrival's Steam ID has to be bound to the owner
+    id of the character that follows it. That window is wide -- ~20s measured, since it spans the
+    client loading the world -- so two people starting a session together will routinely have their
+    arrivals interleave, which is the *normal* case for a group rather than an edge case.
 
-    "now 0 player(s)" clears the set outright. That makes the reader self-correcting: any drift
-    from an ambiguous cycle is wiped the next time the server empties, rather than persisting.
+    ``characters`` resolves that outright: a ``{character name: game id}`` map, from the recorded
+    identities, names the player straight off the character line however simultaneously they
+    joined. Recognising one player also disambiguates the rest, since their arrival is struck from
+    the pending list and may leave exactly one candidate for the next character.
+
+    Only where a character is unrecognised *and* more than one arrival is outstanding does the
+    reader decline to name anyone, rather than pairing by arrival order and risking a
+    transposition. The game's own count still reports them, so they surface as UNATTRIBUTED.
+
+    "now 0 player(s)" clears the set outright, which makes the reader self-correcting: drift from
+    an ambiguous cycle cannot outlive a session.
     """
-    by_owner: dict[str, str] = {}      # zdo owner id -> steam id
-    pending: list[str] = []            # steam ids that have arrived but have no character yet
+    characters = characters or {}
+    by_owner: dict[str, str] = {}      # zdo owner id -> game id
+    pending: list[str] = []            # game ids that have arrived but have no character yet
     for line in log_text.splitlines():
         platform = VALHEIM_PLATFORM_ID.search(line)
         if platform:
@@ -398,9 +407,16 @@ def valheim_connected_players(log_text: str) -> list[str]:
             continue
         character = VALHEIM_CHARACTER.search(line)
         if character:
-            if len(pending) == 1:
-                by_owner[character.group(1)] = pending[0]
-            pending.clear()  # ambiguous or unexpected: drop rather than guess
+            name, owner = character.group(1), character.group(2)
+            known = characters.get(name)
+            if known is not None:
+                by_owner[owner] = known
+                if known in pending:
+                    pending.remove(known)   # narrows the field for the next character
+            elif len(pending) == 1:
+                by_owner[owner] = pending.pop()
+            else:
+                pending.clear()  # ambiguous and unrecognised: decline rather than guess
             continue
         destroyed = VALHEIM_ZDO_DESTROY.search(line)
         if destroyed:
@@ -427,13 +443,20 @@ def has_identity_reader(template_id: str) -> bool:
     return template_id in IDENTITY_READERS
 
 
-def instance_connected_players(template_id: str, container: str, docker_bin: str, window: str) -> list[str] | None:
+def instance_connected_players(template_id: str, container: str, docker_bin: str, window: str,
+                               characters: dict[str, str] | None = None) -> list[str] | None:
     """In-game player IDs currently connected, or None if the game log could not be read."""
     reader = IDENTITY_READERS.get(template_id)
     if reader is None:
         return None
     logs = read_container_logs(container, docker_bin, since=window)
-    return reader(logs) if logs else None
+    if not logs:
+        return None
+    try:
+        return reader(logs, characters or {})
+    except TypeError:
+        # Readers for games that name players outright take the log alone.
+        return reader(logs)
 
 
 def load_player_identities(path: Path) -> dict[str, dict[str, str]]:
@@ -459,16 +482,38 @@ def load_player_identities(path: Path) -> dict[str, dict[str, str]]:
         return {}
     result: dict[str, dict[str, str]] = {}
     for game_id, value in mapping.items():
+        raw_characters = None
         if isinstance(value, str):
             name, login = value, ""
         elif isinstance(value, dict):
             name = value.get("name") if isinstance(value.get("name"), str) else ""
             login = value.get("login") if isinstance(value.get("login"), str) else ""
+            raw_characters = value.get("characters")
         else:
             continue
-        if name:
-            result[str(game_id)] = {"name": name, "login": login}
+        if not name:
+            continue
+        entry: dict[str, Any] = {"name": name, "login": login, "characters": {}}
+        # {template: [in-game character names]} -- how a game's own log refers to this player.
+        if isinstance(value, dict) and isinstance(raw_characters, dict):
+            for template, names in raw_characters.items():
+                if isinstance(template, str) and isinstance(names, list):
+                    entry["characters"][template] = [n for n in names if isinstance(n, str) and n]
+        result[str(game_id)] = entry
     return result
+
+
+def character_index(identities: dict[str, dict[str, Any]], template_id: str) -> dict[str, str]:
+    """Return ``{character name: game id}`` for one game, from the recorded identities.
+
+    Lets a game that names players only by their character -- Valheim on departure, and on arrival
+    whenever two people join at once -- resolve them without guessing from ordering.
+    """
+    index: dict[str, str] = {}
+    for game_id, entry in identities.items():
+        for name in (entry.get("characters") or {}).get(template_id, []):
+            index[name] = game_id
+    return index
 
 
 def read_container_logs(container: str, docker_bin: str, since: str = "120s") -> str:
@@ -589,7 +634,9 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
                         # The game names its own players. Translate its in-game IDs to tailnet
                         # logins; an unmapped ID stays unnamed, so the shortfall against the game's
                         # count reaches the bill as UNATTRIBUTED rather than being guessed at.
-                        connected = instance_connected_players(template_id, f"game-{key}", docker_bin, identity_window)
+                        connected = instance_connected_players(
+                            template_id, f"game-{key}", docker_bin, identity_window,
+                            character_index(identities, template_id))
                         # Match exclusions against the login as well as the in-game name: the
                         # dashboard's Exclusions page validates entries as tailnet logins (they must
                         # contain an "@"), so a name-only comparison would never match anything an

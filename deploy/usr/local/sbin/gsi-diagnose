@@ -103,12 +103,26 @@ OBS
 identities_report() {
   python3 - "$IDENTITIES" <<'IDS'
 import json, re, subprocess, sys, collections
-ADD  = re.compile(r"\[online\] Added peer (\S+) \(steamid:(\d+)\)")
-DROP = re.compile(r"\[online\] (?:Removed peer|Timeout for peer) (\S+)")
-# The game sends a character savegame during play. Attributed only when exactly one player is
-# connected, so the name is unambiguous -- it is the practical way to recognise who an ID belongs
-# to without asking everyone for their Steam profile.
-CHAR = re.compile(r"Sending Character Savegame '([^']+)'")
+
+# Per game: how its log announces an arrival with an in-game id, and how it names the character
+# that id is playing. Character names are what a game like Valheim uses to identify a departing
+# player, so recording them is what lets the meter name people who joined simultaneously.
+GAMES = {
+    "enshrouded": {
+        "container": "game-enshrouded-primary",
+        "joined": re.compile(r"\[online\] Added peer (\S+) \(steamid:(\d+)\)"),
+        "left": re.compile(r"\[online\] (?:Removed peer|Timeout for peer) (\S+)"),
+        "character": re.compile(r"Sending Character Savegame '([^']+)'"),
+        "solo_only": True,   # savegame lines carry no player id; only unambiguous when alone
+    },
+    "valheim": {
+        "container": "game-valheim-primary",
+        "joined": re.compile(r"received local Platform ID Steam_(\d+)"),
+        "left": None,
+        "character": re.compile(r"Got character ZDOID from (.+?) : \d+:\d+"),
+        "solo_only": True,
+    },
+}
 
 try:
     mapping = (json.load(open(sys.argv[1])).get("identities") or {})
@@ -116,48 +130,71 @@ except (FileNotFoundError, ValueError):
     mapping = {}
     print(f"no identity map yet: {sys.argv[1]}")
 
-try:
-    logs = subprocess.run(["docker", "logs", "-t", "game-enshrouded-primary"],
-                          capture_output=True, text=True, timeout=180).stdout
-except Exception as exc:
-    print("could not read game log:", exc); logs = ""
-
-live, chars, seen = {}, collections.defaultdict(collections.Counter), collections.defaultdict(list)
-for line in logs.splitlines():
-    stamp = line.split(" ", 1)[0][:19]
-    added = ADD.search(line)
-    if added:
-        live[added.group(1)] = added.group(2); seen[added.group(2)].append(stamp); continue
-    dropped = DROP.search(line)
-    if dropped:
-        live.pop(dropped.group(1), None); continue
-    character = CHAR.search(line)
-    if character and len(set(live.values())) == 1:
-        chars[next(iter(live.values()))][character.group(1)] += 1
 
 def described(entry):
-    """Render a map entry, which is {"name","login"} or a bare name string."""
     if isinstance(entry, dict):
         name, login = entry.get("name") or "", entry.get("login") or ""
         return f"{name}" + (f"  <{login}>" if login else "  (no login: billed, but sees no dashboard line)")
     return str(entry or "")
 
+
+def recorded_characters(entry, game):
+    if isinstance(entry, dict):
+        return list((entry.get("characters") or {}).get(game) or [])
+    return []
+
+
+seen = collections.defaultdict(dict)          # game -> {player id: last seen}
+observed = collections.defaultdict(lambda: collections.defaultdict(collections.Counter))
+
+for game, spec in GAMES.items():
+    try:
+        out = subprocess.run(["docker", "logs", "-t", spec["container"]],
+                             capture_output=True, text=True, timeout=180).stdout
+    except Exception as exc:
+        print(f"could not read {game} log: {exc}")
+        continue
+    live, handles = [], {}
+    for line in out.splitlines():
+        stamp = line.split(" ", 1)[0][:19]
+        joined = spec["joined"].search(line)
+        if joined:
+            pid = joined.group(joined.re.groups)
+            seen[game][pid] = stamp
+            live.append(pid)
+            if spec["left"] is not None:
+                handles[joined.group(1)] = pid
+            continue
+        if spec["left"] is not None:
+            left = spec["left"].search(line)
+            if left:
+                pid = handles.pop(left.group(1), None)
+                if pid in live:
+                    live.remove(pid)
+                continue
+        character = spec["character"].search(line)
+        if character and len(set(live)) == 1:
+            observed[game][live[0]][character.group(1)] += 1
+
 mapped = {k: v for k, v in mapping.items() if described(v).strip()}
-print(f"\n{len(seen)} player ID(s) seen in the game log, {len(mapped)} mapped to a login\n")
-for pid in sorted(seen, key=lambda k: seen[k][-1], reverse=True):
-    who = described(mapping.get(pid))
-    names = ", ".join(n for n, _ in chars[pid].most_common(3)) or "(never seen playing alone)"
+everyone = sorted({pid for game in seen for pid in seen[game]} | set(mapping))
+print(f"\n{len(everyone)} player ID(s) known, {len(mapped)} mapped to a login\n")
+for pid in everyone:
+    entry = mapping.get(pid)
     print(f"  {pid}")
-    print(f"     billed as  : {who if who else '** UNMAPPED -- playtime lands as UNATTRIBUTED **'}")
-    print(f"     characters : {names}")
-    print(f"     sessions   : {len(seen[pid])}, last {seen[pid][-1]}")
+    print(f"     billed as  : {described(entry) or '** UNMAPPED -- playtime lands as UNATTRIBUTED **'}")
+    for game in GAMES:
+        if pid not in seen[game] and not recorded_characters(entry, game):
+            continue
+        chars = ", ".join(n for n, _ in observed[game][pid].most_common(3)) or "(none seen alone)"
+        have = recorded_characters(entry, game)
+        flag = "" if set(observed[game][pid]) <= set(have) else "   <-- ADD to characters." + game
+        print(f"     {game:<11}: last {seen[game].get(pid, 'never')}  observed: {chars}"
+              f"  recorded: {have or 'none'}{flag}")
     print(f"     profile    : https://steamcommunity.com/profiles/{pid}")
-stale = sorted(set(mapping) - set(seen))
-if stale:
-    print("\nmapped but never seen in the log (harmless):")
-    for pid in stale:
-        print(f"  {pid} -> {described(mapping[pid]) or '(blank)'}")
 print(f"\nedit: sudo nano {sys.argv[1]}   (re-read every cycle; no restart needed)")
+print("recording a character name lets the meter name players who joined at the same moment;")
+print("without it, simultaneous arrivals are reported as UNATTRIBUTED rather than guessed at.")
 IDS
 }
 
