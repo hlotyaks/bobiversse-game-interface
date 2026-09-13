@@ -258,3 +258,44 @@ class ExclusionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JoinCodeTests(unittest.TestCase):
+    """A relay-joined game is reached by code, not by address.
+
+    Valheim in crossplay mode carries no gameplay on its published ports, so a host:port on the
+    dashboard would be an address that cannot work. The code is reissued on every restart, so it
+    cannot live in the catalog and must be read from the running server.
+    """
+
+    LOG = "\n".join([
+        'Session "RhadWorld" registered with join code 079236',
+        'Player joined server "RhadWorld" that has join code 079236, now 1 player(s)',
+    ])
+
+    def _controller(self):
+        return MODULE.Controller.__new__(MODULE.Controller)
+
+    def _code(self, template, stdout, returncode=0):
+        import subprocess, unittest.mock
+        completed = subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+        with unittest.mock.patch.object(MODULE.subprocess, "run", return_value=completed):
+            return MODULE.Controller.join_code_for(
+                self._controller(), {"template_id": template, "instance_id": "primary"})
+
+    def test_reads_the_current_code_for_a_relay_joined_game(self) -> None:
+        self.assertEqual(self._code("valheim", self.LOG), "079236")
+
+    def test_takes_the_most_recent_code_after_a_restart(self) -> None:
+        log = self.LOG + '\nSession "RhadWorld" registered with join code 428815'
+        self.assertEqual(self._code("valheim", log), "428815")
+
+    def test_a_game_joined_by_address_has_no_code(self) -> None:
+        self.assertIsNone(self._code("enshrouded", self.LOG))
+
+    def test_no_code_before_the_server_registers_one(self) -> None:
+        # The session line is emitted with an empty code before the relay assigns one.
+        self.assertIsNone(self._code("valheim", 'New session server "W" that has join code , now 0 player(s)'))
+
+    def test_an_unreadable_log_yields_no_code_rather_than_an_error(self) -> None:
+        self.assertIsNone(self._code("valheim", "", returncode=1))

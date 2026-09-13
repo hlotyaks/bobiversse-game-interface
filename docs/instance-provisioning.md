@@ -90,6 +90,10 @@ sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_c
   The only alternative is publishing the ports on `0.0.0.0` with router port-forwarding, which this
   project's firewall policy deliberately refuses (`game-firewall.sh` never opens an "Anywhere"
   rule). That would be a real change in exposure and should be a deliberate decision, not a default.
+- **The dashboard shows a join code, not an address.** Because the ports carry no gameplay, the
+  controller reads the current code from the running server and the UI shows it in place of the
+  host:port it prints for address-joined games. The code is reissued on every restart, so it is
+  read live rather than stored, and it appears only while the instance is active.
 - **The published UDP ports carry no gameplay.** They are kept because the A2S query and the
   image's own status check use them, and because a future non-relayed deployment would need them.
   Do not read the tailnet-only binding as the access control; the password is.

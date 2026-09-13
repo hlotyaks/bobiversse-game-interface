@@ -305,8 +305,6 @@ def enshrouded_client_count(log_text: str) -> int | None:
     return result
 
 
-# template_id -> function(container log text) -> connected client count (or None if unknown).
-OCCUPANCY_READERS = {"enshrouded": enshrouded_client_count}
 
 # Enshrouded's online subsystem logs an identity for every client, which is the identity source:
 #   [online] Added peer 0(23) (steamid:76561190000000005)
@@ -343,8 +341,85 @@ def enshrouded_connected_players(log_text: str) -> list[str]:
     return sorted(set(live.values()))
 
 
+# --- valheim -------------------------------------------------------------------------------
+# Valheim names a player only as they arrive, never as they leave, so identity has to be carried
+# across three lines rather than read from one:
+#
+#   PlayFab socket with remote ID playfab/4DD2… received local Platform ID Steam_7656…  <- who
+#   Got character ZDOID from Rhad : 643715480:1                                          <- handle
+#   Player joined server "W" that has join code 079236, now 1 player(s)                  <- count
+#
+# and on the way out, the same handle reappears while the Steam ID does not:
+#
+#   Destroying abandoned non persistent zdo 643715480:4 owner 643715480                  <- handle
+#   Player connection lost server "W" that has join code 079236, now 0 player(s)          <- count
+#
+# The ZDO owner id is therefore the only thing linking a departure to an arrival.
+VALHEIM_PLAYER_COUNT = re.compile(r", now (\d+) player\(s\)")
+VALHEIM_PLATFORM_ID = re.compile(r"received local Platform ID Steam_(\d+)")
+VALHEIM_CHARACTER = re.compile(r"Got character ZDOID from .+ : (\d+):\d+")
+VALHEIM_ZDO_DESTROY = re.compile(r"Destroying abandoned [^:]*zdo \d+:\d+ owner (\d+)")
+
+
+def valheim_client_count(log_text: str) -> int | None:
+    """Connected-player count from Valheim's own running total, or None if no line carries one.
+
+    Every join and departure restates the total ("now N player(s)"), and so does the session
+    registration at startup, so the most recent one is the server's current view. Read separately
+    from identity on purpose: when the two disagree the shortfall reaches the bill as UNATTRIBUTED
+    rather than quietly shrinking the group.
+    """
+    found = None
+    for line in log_text.splitlines():
+        match = VALHEIM_PLAYER_COUNT.search(line)
+        if match:
+            found = int(match.group(1))
+    return found
+
+
+def valheim_connected_players(log_text: str) -> list[str]:
+    """Steam IDs currently connected, by replaying Valheim's arrival and departure lines.
+
+    A departure names only the ZDO owner id, so an arrival's Steam ID is bound to the owner id that
+    follows it. That pairing is only taken when exactly one arrival is waiting for a character:
+    two players joining at once could otherwise be transposed, and billing the wrong person is
+    worse than billing nobody -- an unpaired arrival is simply never named, and the game's own
+    count still reports them, so they surface as UNATTRIBUTED.
+
+    "now 0 player(s)" clears the set outright. That makes the reader self-correcting: any drift
+    from an ambiguous cycle is wiped the next time the server empties, rather than persisting.
+    """
+    by_owner: dict[str, str] = {}      # zdo owner id -> steam id
+    pending: list[str] = []            # steam ids that have arrived but have no character yet
+    for line in log_text.splitlines():
+        platform = VALHEIM_PLATFORM_ID.search(line)
+        if platform:
+            pending.append(platform.group(1))
+            continue
+        character = VALHEIM_CHARACTER.search(line)
+        if character:
+            if len(pending) == 1:
+                by_owner[character.group(1)] = pending[0]
+            pending.clear()  # ambiguous or unexpected: drop rather than guess
+            continue
+        destroyed = VALHEIM_ZDO_DESTROY.search(line)
+        if destroyed:
+            by_owner.pop(destroyed.group(1), None)
+            continue
+        count = VALHEIM_PLAYER_COUNT.search(line)
+        if count and int(count.group(1)) == 0:
+            by_owner.clear()
+            pending.clear()
+    return sorted(set(by_owner.values()))
+
+
+# template_id -> function(container log text) -> connected client count (or None if unknown).
+OCCUPANCY_READERS = {"enshrouded": enshrouded_client_count,
+                     "valheim": valheim_client_count}
+
 # template_id -> function(container log text) -> list of in-game player IDs currently connected.
-IDENTITY_READERS = {"enshrouded": enshrouded_connected_players}
+IDENTITY_READERS = {"enshrouded": enshrouded_connected_players,
+                    "valheim": valheim_connected_players}
 
 
 def has_identity_reader(template_id: str) -> bool:

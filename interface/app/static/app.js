@@ -151,6 +151,13 @@ function render() {
 }
 
 function connectionEndpoints(game, record) {
+  // A game reachable only through a relay is joined by code, and its published host:port carries
+  // no gameplay at all -- showing an address there would hand players one that cannot work. The
+  // controller supplies the code only while the server is running, since it is reissued on every
+  // restart.
+  const joinCode = record?.status?.join_code;
+  if (typeof joinCode === 'string' && joinCode) return [{ label: 'Join code', address: joinCode }];
+
   const connection = game.connection || {};
   const ports = record?.instance?.ports || [];
   const gamePort = ports
@@ -169,7 +176,7 @@ async function copyConnection(address) {
   try {
     if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable');
     await navigator.clipboard.writeText(address);
-    showNotice(`Copied connection address: ${address}`);
+    showNotice(`Copied: ${address}`);
   } catch (_error) {
     showNotice(`Copy is unavailable. Use: ${address}`, true);
   }

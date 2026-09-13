@@ -30,6 +30,11 @@ MAX_REQUEST_BYTES = 16_384
 MAX_LOG_LINES = 100
 OPERATION_RETENTION = timedelta(hours=24)
 CRASH_LOOP_RESTART_THRESHOLD = 5
+# Templates whose players join by a relay-issued code instead of an address. Valheim in crossplay
+# mode is reachable only through a relay -- its published ports carry no gameplay -- so printing a
+# host:port on the dashboard would hand players an address that cannot work.
+JOIN_CODE_PATTERNS = {"valheim": re.compile(r"join code (\d{4,10})")}
+
 CRASH_LOOP_AUTO_RESTART_THRESHOLD = max(1, CRASH_LOOP_RESTART_THRESHOLD - 2)
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -457,7 +462,33 @@ class Controller:
                 details["last_failure_reason"] = "systemd restart limit reached; manual retry required"
         else:
             details["message"] = "service unit is not installed or unavailable"
+        join_code = self.join_code_for(instance) if details.get("active_state") == "active" else None
+        if join_code:
+            details["join_code"] = join_code
         return {"template_id": instance["template_id"], "instance_id": instance["instance_id"], "unit": instance["unit"], "registration_state": instance["registration_state"], "backup": self.backup_status_for(instance), **details}
+
+    def join_code_for(self, instance: dict[str, Any]) -> str | None:
+        """The relay join code for games joined by code rather than by address, if one is live.
+
+        Valheim in crossplay mode is reachable only through a relay: its published ports carry no
+        gameplay and the address the dashboard would otherwise print does not work. The code is
+        reissued on every restart, so it cannot be stored in the catalog and has to be read from
+        the running server each time. Returns None for games that are joined by address, and for a
+        crossplay game that has not registered a code yet.
+        """
+        pattern = JOIN_CODE_PATTERNS.get(instance.get("template_id"))
+        if pattern is None:
+            return None
+        container = f"game-{instance['template_id']}-{instance['instance_id']}"
+        try:
+            result = subprocess.run(["/usr/bin/docker", "logs", "--tail", "4000", container],
+                                    capture_output=True, text=True, timeout=20, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        found = pattern.findall(result.stdout + result.stderr)
+        return found[-1] if found else None
 
     def backup_status_for(self, instance: dict[str, Any]) -> dict[str, Any]:
         try:

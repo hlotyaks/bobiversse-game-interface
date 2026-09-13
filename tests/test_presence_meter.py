@@ -328,7 +328,8 @@ class OccupancyUnknownTests(unittest.TestCase):
 
     def test_a_game_without_a_reader_still_uses_the_fallback(self) -> None:
         self.assertTrue(METER.has_occupancy_reader("enshrouded"))
-        self.assertFalse(METER.has_occupancy_reader("valheim"))
+        # valheim gained readers on 2026-09-13; use a template that genuinely has none.
+        self.assertFalse(METER.has_occupancy_reader("no-such-game"))
         import tempfile, json, yaml
         from pathlib import Path
         catalog = yaml.safe_load(CATALOG.read_text(encoding="utf-8"))
@@ -340,9 +341,13 @@ class OccupancyUnknownTests(unittest.TestCase):
                  unittest.mock.patch.object(METER.time, "monotonic", return_value=60.0):
                 METER.run_cycle_tailscale(catalog, ledger, "ts", "sc", "dk", state, 25.0)
             rows = [json.loads(l) for l in ledger.read_text().splitlines()]
-        valheim = [r for r in rows if r["instance"] == "valheim-primary"][0]
-        self.assertEqual(valheim["present"], ["admin@ex"])  # only peer above 25 kbps
-        self.assertEqual(valheim["count"], 1)
+        # Every catalogued template now has readers, so the bandwidth fallback is exercised
+        # directly rather than through a slot: run_cycle only reaches it for a template with none.
+        self.assertEqual(METER.playing_logins(
+            {"admin@ex": {"bytes": 9_000_000, "active": True},
+             "player@ex": {"bytes": 1_040_000, "active": True}},
+            {"admin@ex": 1_000_000, "player@ex": 1_000_000}, dt=60.0, min_kbps=25.0),
+            ["admin@ex"])
 
 
 class WriteRecencyAttributionTests(unittest.TestCase):
@@ -588,3 +593,88 @@ class RepositoryPrivacyTests(unittest.TestCase):
                 if not found.startswith("765611900000000"):
                     offenders.append(f"{name}: {found}")
         self.assertEqual(offenders, [], f"real-looking Steam IDs in tracked files: {offenders}")
+
+
+class ValheimReaderTests(unittest.TestCase):
+    """Valheim names a player on arrival but not on departure.
+
+    Only the ZDO owner id appears on both sides, so an arrival's Steam ID has to be bound to the
+    owner id that follows it. Patterns taken from a real session log, not assumed.
+    """
+
+    JOIN = [
+        "PlayFab listen socket child connected to remote player 4DD2042DF9031F97",
+        'Player joined server "RhadWorld" that has join code 079236, now 1 player(s)',
+        "PlayFab socket with remote ID playfab/4DD2042DF9031F97 received local Platform ID Steam_111",
+        "Got character ZDOID from Rhad : 643715480:1",
+    ]
+    LEAVE = [
+        "RPC_Disconnect",
+        "Destroying abandoned non persistent zdo 643715480:4 owner 643715480",
+        'Player connection lost server "RhadWorld" that has join code 079236, now 0 player(s)',
+    ]
+
+    def test_count_comes_from_the_servers_own_running_total(self) -> None:
+        self.assertEqual(METER.valheim_client_count("\n".join(self.JOIN)), 1)
+        self.assertEqual(METER.valheim_client_count("\n".join(self.JOIN + self.LEAVE)), 0)
+
+    def test_count_is_unknown_when_no_line_carries_one(self) -> None:
+        self.assertIsNone(METER.valheim_client_count("Placed location WoodHouse6 in zone 0,-8"))
+
+    def test_a_connected_player_is_named_by_steam_id(self) -> None:
+        self.assertEqual(METER.valheim_connected_players("\n".join(self.JOIN)), ["111"])
+
+    def test_departure_is_matched_through_the_zdo_owner(self) -> None:
+        self.assertEqual(METER.valheim_connected_players("\n".join(self.JOIN + self.LEAVE)), [])
+
+    def test_reconnecting_under_a_new_owner_id_still_resolves(self) -> None:
+        rejoin = [
+            "PlayFab socket with remote ID playfab/4DD2042DF9031F97 received local Platform ID Steam_111",
+            "Got character ZDOID from Rhad : 999:1",
+            'Player joined server "RhadWorld" that has join code 079236, now 1 player(s)',
+        ]
+        self.assertEqual(METER.valheim_connected_players("\n".join(self.JOIN + self.LEAVE + rejoin)), ["111"])
+
+    def test_simultaneous_arrivals_are_left_unnamed_rather_than_transposed(self) -> None:
+        # Two arrivals pending when a character appears: the pairing is ambiguous, and billing the
+        # wrong person is worse than billing nobody. The game's count still reports them, so they
+        # reach the bill as UNATTRIBUTED.
+        lines = [
+            "PlayFab socket with remote ID playfab/AAA received local Platform ID Steam_111",
+            "PlayFab socket with remote ID playfab/BBB received local Platform ID Steam_222",
+            "Got character ZDOID from Rhad : 500:1",
+            "Got character ZDOID from Gronk : 501:1",
+            'Player joined server "W" that has join code 1, now 2 player(s)',
+        ]
+        text = "\n".join(lines)
+        self.assertEqual(METER.valheim_connected_players(text), [])
+        self.assertEqual(METER.valheim_client_count(text), 2)  # still counted
+
+    def test_an_empty_server_clears_any_drift(self) -> None:
+        # "now 0 player(s)" is authoritative, so a stuck entry cannot outlive the session.
+        stuck = ["PlayFab socket with remote ID playfab/AAA received local Platform ID Steam_111",
+                 "Got character ZDOID from Rhad : 500:1",
+                 'Player connection lost server "W" that has join code 1, now 0 player(s)']
+        self.assertEqual(METER.valheim_connected_players("\n".join(stuck)), [])
+
+    def test_two_players_joining_separately_are_both_named(self) -> None:
+        lines = [
+            "PlayFab socket with remote ID playfab/AAA received local Platform ID Steam_111",
+            "Got character ZDOID from Rhad : 500:1",
+            'Player joined server "W" that has join code 1, now 1 player(s)',
+            "PlayFab socket with remote ID playfab/BBB received local Platform ID Steam_222",
+            "Got character ZDOID from Gronk : 501:1",
+            'Player joined server "W" that has join code 1, now 2 player(s)',
+        ]
+        self.assertEqual(METER.valheim_connected_players("\n".join(lines)), ["111", "222"])
+
+    def test_one_of_two_leaving_removes_only_that_player(self) -> None:
+        lines = [
+            "PlayFab socket with remote ID playfab/AAA received local Platform ID Steam_111",
+            "Got character ZDOID from Rhad : 500:1",
+            "PlayFab socket with remote ID playfab/BBB received local Platform ID Steam_222",
+            "Got character ZDOID from Gronk : 501:1",
+            "Destroying abandoned non persistent zdo 500:2 owner 500",
+            'Player connection lost server "W" that has join code 1, now 1 player(s)',
+        ]
+        self.assertEqual(METER.valheim_connected_players("\n".join(lines)), ["222"])
