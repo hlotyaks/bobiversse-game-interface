@@ -76,17 +76,20 @@ sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_c
   `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID` — taken from that script, not assumed.
   `no-new-privileges` still applies, ports are still tailnet-only, and caps are still a deny-list
   of one.
-- **`SERVER_PUBLIC=1`** is set in the adapter, and the reasoning is the opposite of what it looks
-  like. Valheim carries gameplay over **Steam's relay**, not the tailnet: a packet capture on
-  `tailscale0` during a join attempt caught nothing on either published port. So binding the ports
-  to the tailnet IP never gated who could reach the game — it only gated the A2S query. With
-  `SERVER_PUBLIC=0` and no crossplay the image leaves the server unqueryable *and* undiscoverable
-  (see its `valheim/common`), so nobody can join at all; that was the first attempt here, and the
-  client failed to connect with no packet ever reaching the host.
+- **`CROSSPLAY=true`, joined by code.** This is forced by the deployment rather than chosen.
+  The game ports are published only on the host's tailnet IP, so Steam's master servers cannot
+  query the server from the public internet and will never list it — `SERVER_PUBLIC=1` registers a
+  server nobody can find, which is exactly what happened on the first attempt. Valheim also carries
+  gameplay over a relay rather than the tailnet (a capture on `tailscale0` during a join attempt
+  caught nothing on either port), so the tailnet address is not a usable connection path either.
 
-  Entry is gated by `SERVER_PASS`; only the server's *name* is public. The private alternative is
-  `CROSSPLAY=true`, which swaps Steam's relay for PlayFab's and issues a join code instead of
-  listing the server — at the cost of the server not listening on `SERVER_PORT` at all.
+  Crossplay needs no inbound reachability: the server dials out to PlayFab's relay and issues a
+  **join code**, printed in the server log on startup. Players use Join Game → Join with code.
+  Entry remains gated by `SERVER_PASS`.
+
+  The only alternative is publishing the ports on `0.0.0.0` with router port-forwarding, which this
+  project's firewall policy deliberately refuses (`game-firewall.sh` never opens an "Anywhere"
+  rule). That would be a real change in exposure and should be a deliberate decision, not a default.
 - **The published UDP ports carry no gameplay.** They are kept because the A2S query and the
   image's own status check use them, and because a future non-relayed deployment would need them.
   Do not read the tailnet-only binding as the access control; the password is.
