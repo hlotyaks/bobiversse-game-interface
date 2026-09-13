@@ -15,6 +15,7 @@ names, and container UID), so templates are handled by small per-template adapte
 from __future__ import annotations
 
 import argparse
+import json
 import importlib.util
 import sys
 from pathlib import Path
@@ -108,7 +109,92 @@ def render_enshrouded(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
     }
 
 
-ADAPTERS = {"enshrouded": render_enshrouded}
+def render_valheim(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
+    """Build the Compose service for community-valheim-tools/valheim-server.
+
+    Unlike the Enshrouded image, this one *starts as root on purpose*: its bootstrap runs
+    ``groupmod``, rewrites ``/etc/passwd``, and ``chown -R``s the data directories before
+    supervisord drops to ``PUID:PGID``. A blanket ``cap_drop: [ALL]`` therefore breaks it at
+    startup, so we drop everything and add back only what that sequence needs. Verified against
+    the pinned image's own ``/usr/local/sbin/bootstrap``, not assumed.
+
+    Two persistent paths, both from the image's own layout: ``/config`` holds worlds, backups and
+    configuration; ``/opt/valheim`` holds the downloaded server build.
+    """
+    template, instance = resolved["template_id"], resolved["instance_id"]
+    instance_dir = f"{INSTANCES_ROOT}/{template}-{instance}"
+    data_root = resolved["paths"]["instance_data"]
+    limits = resolved["resource_limits"]["compose"]
+    udp_ports = sorted(port["host"] for port in resolved["ports"] if port.get("protocol") == "udp")
+    if len(udp_ports) < 2:
+        raise ValueError("valheim requires two consecutive reserved UDP ports (game and query)")
+    game_port = udp_ports[0]
+    if udp_ports[1] != game_port + 1:
+        # The server derives its query port as SERVER_PORT+1 and cannot be told otherwise, so a
+        # non-consecutive reservation would publish a port nothing listens on.
+        raise ValueError(f"valheim needs consecutive ports; catalog reserves {udp_ports}")
+    uid, gid = VALHEIM_UID_GID.split(":")
+    return {
+        "name": resolved["paths"]["compose_project"],
+        "services": {
+            "server": {
+                "image": f"{resolved['image']}@{resolved['image_digest']}",
+                "container_name": resolved["paths"]["compose_project"],
+                "init": True,
+                "restart": "no",
+                # The image traps SIGTERM to save the world before exiting; give it room.
+                "stop_grace_period": "120s",
+                "environment": {
+                    "SERVER_PORT": str(game_port),
+                    # Never advertise on Steam's public server list: this world is tailnet-only,
+                    # and the published ports are bound to the tailnet IP alone.
+                    "SERVER_PUBLIC": "0",
+                    "PUID": uid,
+                    "PGID": gid,
+                },
+                # SERVER_NAME, WORLD_NAME and the secret SERVER_PASS live in this root-only file
+                # written by the provisioning script -- never in the catalog.
+                "env_file": [f"{instance_dir}/{template}.env"],
+                "ports": _publish(bind_ip, resolved["ports"]),
+                "volumes": [
+                    {"type": "bind", "source": f"{data_root}/config",
+                     "target": "/config", "read_only": False},
+                    {"type": "bind", "source": f"{data_root}/server",
+                     "target": "/opt/valheim", "read_only": False},
+                ],
+                "cap_drop": ["ALL"],
+                # Exactly what bootstrap needs to chown the data tree and drop privileges.
+                "cap_add": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
+                "security_opt": ["no-new-privileges:true"],
+                "pids_limit": 512,
+                "mem_limit": limits["mem_limit"],
+                "cpus": float(limits["cpus"]),
+                "networks": ["game"],
+            }
+        },
+        "networks": {"game": {"driver": "bridge"}},
+    }
+
+
+ADAPTERS = {"enshrouded": render_enshrouded, "valheim": render_valheim}
+
+# Per-template provisioning facts the root shell script needs but must not hardcode a second time:
+# which host directories to create for the bind mounts, who must own them, and which keys the
+# operator is prompted for in the root-only secret env. Kept beside the adapters so adding a game
+# is one edit, not two files that can drift apart.
+VALHEIM_UID_GID = "10000:10000"
+PROVISIONING = {
+    "enshrouded": {
+        "uid_gid": "10000:10000",   # the image's fixed built-in UID; not configurable
+        "data_dirs": ["savegame"],
+        "secret_keys": ["SERVER_NAME", "SERVER_SLOTS", "SERVER_PASSWORD"],
+    },
+    "valheim": {
+        "uid_gid": VALHEIM_UID_GID,  # arbitrary; passed to the image as PUID/PGID
+        "data_dirs": ["config", "server"],
+        "secret_keys": ["SERVER_NAME", "WORLD_NAME", "SERVER_PASS"],
+    },
+}
 
 
 def render_unit(resolved: dict[str, Any]) -> str:
@@ -166,12 +252,25 @@ def render(catalog_path: Path, template: str, instance: str, bind_ip: str) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render a per-instance compose file and systemd unit.")
-    parser.add_argument("template", help="catalog template id, e.g. enshrouded")
-    parser.add_argument("instance", help="allowlisted instance id, e.g. primary")
+    parser.add_argument("--describe", metavar="TEMPLATE",
+                        help="print this template's provisioning facts as JSON and exit "
+                             "(directories to create, owning uid:gid, secret env keys)")
+    parser.add_argument("template", nargs="?", help="catalog template id, e.g. enshrouded")
+    parser.add_argument("instance", nargs="?", help="allowlisted instance id, e.g. primary")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--bind-ip", default=DEFAULT_BIND_IP, help="host IP to publish game ports on")
     parser.add_argument("--output-dir", type=Path, help="write the rendered files here (default: print to stdout)")
     args = parser.parse_args()
+
+    if args.describe:
+        facts = PROVISIONING.get(args.describe)
+        if facts is None:
+            print(f"no provisioning profile for template '{args.describe}'", file=sys.stderr)
+            return 1
+        print(json.dumps(facts, sort_keys=True))
+        return 0
+    if not args.template or not args.instance:
+        parser.error("template and instance are required unless --describe is given")
 
     try:
         files = render(args.catalog, args.template, args.instance, args.bind_ip)

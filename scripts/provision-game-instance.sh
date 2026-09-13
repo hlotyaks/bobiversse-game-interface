@@ -10,7 +10,9 @@ set -Eeuo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 catalog=/etc/game-server-interface/catalog.yaml
 instances_root=/etc/game-server-interface/instances
-container_uid_gid=10000:10000   # sknnr/enshrouded-dedicated-server runs as this fixed UID.
+# Per-template provisioning facts (owning uid:gid, bind-mount directories, secret env keys) come
+# from tools/render_instance.py --describe, so adding a game is one edit there rather than a second
+# set of hardcoded values here that can drift from the Compose adapter.
 
 if [[ ${EUID} -ne 0 ]]; then
     echo "Run with sudo: sudo ./scripts/provision-game-instance.sh <template> <instance>" >&2
@@ -31,7 +33,6 @@ fi
 
 account="${template}-${instance}"
 data_dir="/srv/games/${account}"
-savegame_dir="${data_dir}/savegame"
 instance_dir="${instances_root}/${account}"
 secret_env="${instance_dir}/${template}.env"
 unit="game-${account}.service"
@@ -46,10 +47,21 @@ else
     /usr/local/sbin/create-game-account "${account}"
 fi
 
-# 3. Savegame bind-mount directory, owned by the container's fixed UID/GID.
+# 3. Bind-mount directories for this template, owned by the UID the container runs its files as.
+profile=$(python3 "${repo_root}/tools/render_instance.py" --describe "${template}") || {
+    echo "Error: no provisioning profile for template '${template}'." >&2
+    echo "Add one to PROVISIONING in tools/render_instance.py alongside its Compose adapter." >&2
+    exit 1
+}
+container_uid_gid=$(printf '%s' "${profile}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["uid_gid"])')
+mapfile -t data_dirs < <(printf '%s' "${profile}" | python3 -c 'import json,sys; [print(d) for d in json.load(sys.stdin)["data_dirs"]]')
+mapfile -t secret_keys < <(printf '%s' "${profile}" | python3 -c 'import json,sys; [print(k) for k in json.load(sys.stdin)["secret_keys"]]')
+
 install -d -o root -g root -m 0755 "${data_dir}"
-install -d -m 0770 "${savegame_dir}"
-chown "${container_uid_gid}" "${savegame_dir}"
+for sub in "${data_dirs[@]}"; do
+    install -d -m 0770 "${data_dir}/${sub}"
+    chown "${container_uid_gid}" "${data_dir}/${sub}"
+done
 
 # 4. Root-only secret/config env. Never written to the catalog or logs; kept if present.
 install -d -o root -g root -m 0755 "${instances_root}" "${instance_dir}"
@@ -64,21 +76,37 @@ print(min(int(data["templates"][template].get("supported_players", 16)), 16))
 PY
 )
     printf 'Configuring %s. Values are stored root-only at %s\n' "${account}" "${secret_env}"
-    read -r -p "Server name [${account}]: " server_name </dev/tty || true
-    server_name=${server_name:-${account}}
-    read -r -p "Player slots (max 16) [${default_slots}]: " server_slots </dev/tty || true
-    server_slots=${server_slots:-${default_slots}}
-    while :; do
-        read -r -s -p "Server password (min 5 chars): " server_password </dev/tty; echo
-        [[ ${#server_password} -ge 5 ]] && break
-        echo "Password must be at least 5 characters."
-    done
     umask 077
-    cat >"${secret_env}" <<EOF
-SERVER_NAME=${server_name}
-SERVER_SLOTS=${server_slots}
-SERVER_PASSWORD=${server_password}
-EOF
+    : >"${secret_env}"
+    for key in "${secret_keys[@]}"; do
+        case "${key}" in
+            SERVER_NAME)
+                read -r -p "Server name [${account}]: " value </dev/tty || true
+                value=${value:-${account}}
+                ;;
+            WORLD_NAME)
+                read -r -p "World name [${account}]: " value </dev/tty || true
+                value=${value:-${account}}
+                ;;
+            SERVER_SLOTS)
+                read -r -p "Player slots (max 16) [${default_slots}]: " value </dev/tty || true
+                value=${value:-${default_slots}}
+                ;;
+            SERVER_PASSWORD|SERVER_PASS)
+                # Both Enshrouded and Valheim reject passwords shorter than five characters, and
+                # Valheim additionally refuses a password contained in the server or world name.
+                while :; do
+                    read -r -s -p "Server password (min 5 chars): " value </dev/tty; echo
+                    [[ ${#value} -ge 5 ]] || { echo "Password must be at least 5 characters."; continue; }
+                    break
+                done
+                ;;
+            *)
+                read -r -p "${key}: " value </dev/tty || true
+                ;;
+        esac
+        printf '%s=%s\n' "${key}" "${value}" >>"${secret_env}"
+    done
     chown root:root "${secret_env}"
     chmod 0600 "${secret_env}"
 fi
@@ -106,7 +134,7 @@ cat <<EOF
 Provisioned ${account}:
   Service account : ${account} ($(id -u "${account}"):$(id -g "${account}"))
   Data directory  : ${data_dir}
-  Savegame mount  : ${savegame_dir} (owned ${container_uid_gid})
+  Data mounts     : ${data_dir}/{$(IFS=,; echo "${data_dirs[*]}")} (owned ${container_uid_gid})
   Secret env      : ${secret_env} (root-only)
   Compose file    : ${instance_dir}/compose.yaml
   Systemd unit    : ${unit} (enabled, not started)
@@ -114,7 +142,7 @@ Provisioned ${account}:
 
 Next steps:
   1. Register the slot with the controller (as game-interface-api).
-  2. Place any migrated world save into ${savegame_dir}/ and chown -R ${container_uid_gid}.
+  2. Place any migrated world save under ${data_dir}/ and chown -R ${container_uid_gid}.
   3. Open the tailnet-scoped firewall: sudo ./scripts/game-firewall.sh <udp-ports>
   4. Start via the controller, or: sudo systemctl start ${unit}
 EOF
