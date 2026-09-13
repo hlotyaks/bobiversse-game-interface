@@ -268,6 +268,9 @@ def render_text(report: dict[str, Any], instance: str) -> str:
             f"{data['group_hours']:>8.2f}{data['solo_pct']:>6.0f}%{currency + ' ' + format(data['charge'], '.2f'):>10}"
         )
     totals = report["totals"]
+    if not report.get("rate_configured", True):
+        lines.append(f"  WARNING: no run_cost_per_hour for {instance} in billing.yaml -- "
+                     f"playtime is recorded but bills as zero")
     lines += [
         f"  {'-' * 69}",
         f"  actual cost: {currency} {totals['actual_cost']:.2f}   "
@@ -303,6 +306,7 @@ def build_report(ledger_path: Path, config: dict[str, Any], instance: str, month
     selected = month if month else current_month()
     samples = filter_by_month(all_samples, selected)
     instances = config.get("instances", {})
+    configured = isinstance(instances, dict) and instance in instances
     instance_cfg = instances.get(instance, {}) if isinstance(instances, dict) else {}
     rate = float(instance_cfg.get("run_cost_per_hour", 0.0))
     report = compute_report(
@@ -315,31 +319,152 @@ def build_report(ledger_path: Path, config: dict[str, Any], instance: str, month
     )
     report["currency"] = config.get("currency", "USD")
     report["instance"] = instance
+    # A game with no entry in billing.yaml costs zero per hour, so it bills nothing while still
+    # accruing real playtime. Silently free is the wrong failure for a cost-sharing tool -- adding a
+    # game must not quietly stop charging for it -- so say so on the report.
+    report["rate_configured"] = configured
     report["month"] = selected
     report["available_months"] = months
     return report
+
+
+def ledger_instances(path: Path, month: str | None = None) -> list[str]:
+    """Instances that saw at least one connected player, most-played first.
+
+    Idle slots are skipped: the meter writes a sample per configured slot per cycle whether or not
+    the game is running, so every catalog entry appears in the ledger regardless of use.
+    """
+    played: dict[str, int] = {}
+    for sample in load_ledger(path):
+        if month is not None and sample["ts_dt"].astimezone(UTC).strftime("%Y-%m") != month:
+            continue
+        occupancy = sample["count"] if sample.get("count") is not None else len(sample["present"])
+        if occupancy:
+            played[sample["instance"]] = played.get(sample["instance"], 0) + 1
+    return sorted(played, key=lambda name: (-played[name], name))
+
+
+def build_combined_report(ledger_path: Path, config: dict[str, Any], month: str | None = None) -> dict[str, Any]:
+    """One bill spanning every game, with each player's hours broken out per game.
+
+    Each instance is costed independently -- rates and the group-size multiplier are per game, and
+    two games running at once are two servers to pay for -- then summed per player. So a player's
+    combined charge is the sum of their per-game charges, never a re-derivation from combined hours.
+    """
+    selected = month or current_month()
+    months = sorted(set(available_months(load_ledger(ledger_path))) | {selected})
+    reports = {instance: build_report(ledger_path, config, instance, selected)
+               for instance in ledger_instances(ledger_path, selected)}
+
+    users: dict[str, dict[str, Any]] = {}
+    for instance, report in reports.items():
+        for login, data in report["users"].items():
+            entry = users.setdefault(login, {"hours": 0.0, "solo_hours": 0.0, "group_hours": 0.0,
+                                             "charge": 0.0, "per_game": {}})
+            entry["hours"] += data["hours"]
+            entry["solo_hours"] += data["solo_hours"]
+            entry["group_hours"] += data["group_hours"]
+            entry["charge"] += data["charge"]
+            entry["per_game"][instance] = {"hours": data["hours"], "charge": data["charge"]}
+            if "login" in data:
+                entry["login"] = data["login"]
+    for entry in users.values():
+        for key in ("hours", "solo_hours", "group_hours"):
+            entry[key] = round(entry[key], 3)
+        entry["charge"] = round(entry["charge"], 2)
+        entry["solo_pct"] = round(100.0 * entry["solo_hours"] / entry["hours"], 1) if entry["hours"] else 0.0
+
+    def summed(key: str) -> float:
+        return round(sum(report["totals"][key] for report in reports.values()), 3)
+
+    return {
+        "currency": config.get("currency", "USD"),
+        "month": selected,
+        "available_months": months,
+        "instances": reports,
+        "users": dict(sorted(users.items())),
+        "totals": {
+            "player_count": len(users),
+            "game_count": len(reports),
+            "server_up_hours": summed("server_up_hours"),
+            "player_hours": summed("player_hours"),
+            "actual_cost": round(summed("actual_cost"), 2),
+            "charged": round(summed("charged"), 2),
+            "kitty": round(summed("kitty"), 2),
+            "unattributed_player_hours": summed("unattributed_player_hours"),
+            "unbilled": round(summed("unbilled"), 2),
+            "meter_blind_hours": summed("meter_blind_hours"),
+        },
+    }
+
+
+def render_combined_text(report: dict[str, Any]) -> str:
+    """Per-player rows with a column per game, so 'who played what' reads off the bill directly."""
+    currency = report.get("currency") or ""
+    games = list(report["instances"])
+    if not games:
+        return f"No play recorded in {report['month']}."
+    width = max(12, *(len(game) for game in games))
+    header = "".join(f"{game:>{width + 2}}" for game in games)
+    lines = [
+        f"Combined usage report  ({report['month']})",
+        f"  games: {report['totals']['game_count']}   players: {report['totals']['player_count']}   "
+        f"server up: {_hours(report['totals']['server_up_hours'])}",
+        "",
+        f"  {'player':<20}{header}{'total':>10}{'bill':>11}",
+        f"  {'-' * 20}{'-' * (len(games) * (width + 2))}{'-' * 10}{'-' * 11}",
+    ]
+    for login, data in report["users"].items():
+        cells = "".join(f"{data['per_game'].get(game, {}).get('hours', 0.0):>{width + 2}.2f}" for game in games)
+        lines.append(f"  {login:<20}{cells}{data['hours']:>10.2f}"
+                     f"{currency + ' ' + format(data['charge'], '.2f'):>11}")
+    totals = report["totals"]
+    lines += [
+        f"  {'-' * (20 + len(games) * (width + 2) + 21)}",
+        f"  actual cost: {currency} {totals['actual_cost']:.2f}   "
+        f"charged: {currency} {totals['charged']:.2f}   kitty: {currency} {totals['kitty']:.2f}",
+    ]
+    if totals["unattributed_player_hours"]:
+        lines.append(f"  UNATTRIBUTED: {_hours(totals['unattributed_player_hours'])} across all games "
+                     f"({currency} {totals['unbilled']:.2f} unbilled)")
+    unpriced = [game for game, sub in report["instances"].items() if not sub.get("rate_configured", True)]
+    if unpriced:
+        lines.append(f"  WARNING: no run_cost_per_hour in billing.yaml for {', '.join(unpriced)} -- "
+                     f"playtime is recorded but bills as zero")
+    lines += ["", "  (Dry run -- no money is charged. Each game is costed on its own rate and group",
+              "   multiplier, then summed per player.)"]
+    return "\n".join(lines)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compute per-user playtime and a dry-run cost-share bill.")
     parser.add_argument("--ledger", type=Path, default=Path("/var/lib/game-server-interface/presence.jsonl"))
     parser.add_argument("--config", type=Path, default=Path("/etc/game-server-interface/billing.yaml"))
-    parser.add_argument("--instance", required=True, help="instance id, e.g. enshrouded-primary")
+    parser.add_argument("--instance", help="instance id, e.g. enshrouded-primary")
+    parser.add_argument("--all-games", action="store_true",
+                        help="one combined bill across every game played, with a column per game")
     parser.add_argument("--month", help="YYYY-MM to report (default: current month to date)")
     parser.add_argument("--json", action="store_true", help="emit the report as JSON instead of text")
     args = parser.parse_args()
+    if not args.all_games and not args.instance:
+        parser.error("--instance is required unless --all-games is given")
 
     try:
         config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
         if not isinstance(config, dict):
             raise ValueError("billing config must be a mapping")
-        report = build_report(args.ledger, config, args.instance, args.month)
+        if args.all_games:
+            report = build_combined_report(args.ledger, config, args.month)
+        else:
+            report = build_report(args.ledger, config, args.instance, args.month)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"billing report failed: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
+    elif args.all_games:
+        print(render_combined_text(report))
     else:
         print(render_text(report, args.instance))
     return 0

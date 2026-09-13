@@ -14,6 +14,12 @@ instances:
     run_cost_per_hour: 0.18
   enshrouded-secondary:
     run_cost_per_hour: 0.18
+  # Every game slot that can run needs a rate here. A slot with no entry accrues playtime and
+  # bills zero, which looks like a working bill that happens to be free.
+  valheim-primary:
+    run_cost_per_hour: 0.18
+  valheim-secondary:
+    run_cost_per_hour: 0.18
 
 # Group-size multiplier m(n): players present -> multiplier applied to the split cost. Solo
 # (>1) carries a premium; larger groups (<1) are subsidized. Any group size beyond the largest

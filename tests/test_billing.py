@@ -241,3 +241,85 @@ class LedgerCountFieldTests(unittest.TestCase):
         self.assertEqual([s["count"] for s in loaded], [3, None, None, None])
         # Only the explicit null and the malformed string are "blind"; a missing key is legacy.
         self.assertEqual([s["count_known"] for s in loaded], [True, False, True, False])
+
+
+class CombinedBillingTests(unittest.TestCase):
+    """One bill across several games, with each player's hours broken out per game."""
+
+    CONFIG = {"currency": "USD", "sample_interval_seconds": 60, "max_gap_seconds": 150,
+              "multiplier_schedule": SCHEDULE, "default_multiplier": DEFAULT_M,
+              "instances": {"enshrouded-primary": {"run_cost_per_hour": 3600.0},
+                            "valheim-primary": {"run_cost_per_hour": 3600.0}}}
+
+    def _ledger(self, rows):
+        import json, tempfile
+        handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+        for minute, instance, present, count in rows:
+            ts = (BASE + timedelta(minutes=minute)).isoformat().replace("+00:00", "Z")
+            handle.write(json.dumps({"ts": ts, "instance": instance,
+                                     "present": present, "count": count}) + "\n")
+        handle.close()
+        return Path(handle.name)
+
+    ROWS = [(0, "enshrouded-primary", ["alice"], 1), (1, "enshrouded-primary", [], 0),
+            (0, "valheim-primary", ["alice", "bob"], 2), (1, "valheim-primary", [], 0)]
+
+    def test_a_player_gets_a_row_per_game_plus_a_total(self) -> None:
+        path = self._ledger(self.ROWS)
+        report = BILLING.build_combined_report(path, self.CONFIG, "2026-07")
+        path.unlink()
+        alice = report["users"]["alice"]
+        self.assertEqual(set(alice["per_game"]), {"enshrouded-primary", "valheim-primary"})
+        self.assertAlmostEqual(alice["hours"], alice["per_game"]["enshrouded-primary"]["hours"]
+                               + alice["per_game"]["valheim-primary"]["hours"], places=3)
+
+    def test_each_game_is_costed_on_its_own_multiplier(self) -> None:
+        # alice solos enshrouded (m(1)=1.5) and duos valheim (m(2)=1.2 split two ways). Her combined
+        # charge is the sum of the two, never a re-derivation from combined hours.
+        path = self._ledger(self.ROWS)
+        report = BILLING.build_combined_report(path, self.CONFIG, "2026-07")
+        path.unlink()
+        alice = report["users"]["alice"]
+        self.assertAlmostEqual(alice["per_game"]["enshrouded-primary"]["charge"], 60.0 * 1.5, places=2)
+        self.assertAlmostEqual(alice["per_game"]["valheim-primary"]["charge"], 60.0 * 1.2 / 2, places=2)
+        self.assertAlmostEqual(alice["charge"],
+                               alice["per_game"]["enshrouded-primary"]["charge"]
+                               + alice["per_game"]["valheim-primary"]["charge"], places=2)
+
+    def test_idle_slots_are_left_out(self) -> None:
+        # The meter writes a sample per configured slot every cycle whether or not it is running.
+        rows = self.ROWS + [(0, "valheim-secondary", [], 0), (1, "valheim-secondary", [], 0)]
+        path = self._ledger(rows)
+        report = BILLING.build_combined_report(path, self.CONFIG, "2026-07")
+        path.unlink()
+        self.assertNotIn("valheim-secondary", report["instances"])
+
+    def test_totals_sum_across_games(self) -> None:
+        path = self._ledger(self.ROWS)
+        report = BILLING.build_combined_report(path, self.CONFIG, "2026-07")
+        path.unlink()
+        self.assertEqual(report["totals"]["game_count"], 2)
+        self.assertEqual(report["totals"]["player_count"], 2)
+        per_game_cost = sum(sub["totals"]["actual_cost"] for sub in report["instances"].values())
+        self.assertAlmostEqual(report["totals"]["actual_cost"], per_game_cost, places=2)
+
+    def test_a_game_with_no_configured_rate_is_flagged_not_silently_free(self) -> None:
+        config = {**self.CONFIG, "instances": {"enshrouded-primary": {"run_cost_per_hour": 3600.0}}}
+        path = self._ledger(self.ROWS)
+        report = BILLING.build_combined_report(path, config, "2026-07")
+        rendered = BILLING.render_combined_text(report)
+        path.unlink()
+        self.assertFalse(report["instances"]["valheim-primary"]["rate_configured"])
+        self.assertTrue(report["instances"]["enshrouded-primary"]["rate_configured"])
+        self.assertIn("valheim-primary", rendered)
+        self.assertIn("WARNING", rendered)
+
+    def test_every_catalog_slot_has_a_rate_in_the_shipped_config(self) -> None:
+        import yaml
+        catalog = yaml.safe_load((REPO_ROOT / "deploy/etc/game-server-interface/catalog.yaml").read_text())
+        config = yaml.safe_load((REPO_ROOT / "deploy/etc/game-server-interface/billing.yaml").read_text())
+        priced = set(config.get("instances") or {})
+        slots = {f"{template}-{slot}"
+                 for template, body in (catalog.get("templates") or {}).items()
+                 for slot in ((body.get("instance_policy") or {}).get("slots") or {})}
+        self.assertEqual(slots - priced, set(), "catalog slot(s) with no run_cost_per_hour")
