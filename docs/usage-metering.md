@@ -123,6 +123,15 @@ Correcting a bad capture after the fact:
 `--dry-run` first), or `--clear-month YYYY-MM --instance <id>` to retire a month whose capture is
 not trustworthy.
 
+Valheim's readers are the second worked example, and they show the shape is not always the same.
+Valheim names a player as they arrive but **not** as they leave, so identity is carried across
+three lines — the Steam ID on connect, the ZDO owner id of their character, and the running
+`now N player(s)` total — and a departure is matched only by that owner id reappearing. Where two
+players arrive close enough together that the pairing would be ambiguous, neither is named rather
+than risking a transposition; the game's own count still reports them, so they reach the bill as
+UNATTRIBUTED. A `now 0 player(s)` line clears the set outright, which makes the reader
+self-correcting: drift cannot outlive a session.
+
 Adding a new game means writing two small functions keyed by template in
 [tools/presence_meter.py](../tools/presence_meter.py): an `OCCUPANCY_READERS` entry for the count
 and an `IDENTITY_READERS` entry for the identities. Games that log neither fall back to the
