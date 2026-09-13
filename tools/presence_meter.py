@@ -528,6 +528,14 @@ def read_container_logs(container: str, docker_bin: str, since: str = "120s") ->
     return result.stdout + result.stderr
 
 
+# How far back to read when asking a game how many players it has. A game that prints a periodic
+# snapshot only needs the last couple of minutes; a game that prints a running total when someone
+# joins or leaves needs a window long enough to contain the last such event, or a quiet server
+# reads as "unknown" and its idle time is billed as meter-blind rather than as nobody playing.
+OCCUPANCY_WINDOWS = {"valheim": DEFAULT_IDENTITY_WINDOW}
+DEFAULT_OCCUPANCY_WINDOW = "120s"
+
+
 def instance_client_count(template_id: str, container: str, docker_bin: str) -> int | None:
     """Game-authoritative connected-client count for an instance, or None if we can't tell.
 
@@ -539,7 +547,8 @@ def instance_client_count(template_id: str, container: str, docker_bin: str) -> 
     reader = OCCUPANCY_READERS.get(template_id)
     if reader is None:
         return None
-    logs = read_container_logs(container, docker_bin)
+    logs = read_container_logs(container, docker_bin,
+                               since=OCCUPANCY_WINDOWS.get(template_id, DEFAULT_OCCUPANCY_WINDOW))
     return reader(logs) if logs else None
 
 

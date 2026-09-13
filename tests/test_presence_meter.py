@@ -744,3 +744,43 @@ class CharacterIndexTests(unittest.TestCase):
             loaded = METER.load_player_identities(path)
         self.assertEqual(loaded["111"]["characters"], {"valheim": ["Rhad"]})
         self.assertEqual(loaded["222"], {"name": "BareString", "login": "", "characters": {}})
+
+
+class OccupancyWindowTests(unittest.TestCase):
+    """How far back to read depends on how a game reports its player count.
+
+    Enshrouded prints a periodic snapshot, so the last two minutes always contain one. Valheim
+    prints a running total only when someone joins or leaves, so a quiet server has nothing in a
+    short window and reads as *unknown* -- which billing treats as meter-blind, accruing unbilled
+    blind hours for a server that is simply empty.
+    """
+
+    def test_an_event_driven_game_reads_a_long_window(self) -> None:
+        self.assertEqual(METER.OCCUPANCY_WINDOWS["valheim"], METER.DEFAULT_IDENTITY_WINDOW)
+
+    def test_a_snapshot_game_keeps_the_short_default(self) -> None:
+        self.assertNotIn("enshrouded", METER.OCCUPANCY_WINDOWS)
+        self.assertEqual(METER.DEFAULT_OCCUPANCY_WINDOW, "120s")
+
+    def test_the_window_is_what_reaches_docker(self) -> None:
+        captured = {}
+
+        def fake_logs(container, docker_bin, since="120s"):
+            captured[container] = since
+            return 'Player joined server "W" that has join code 1, now 1 player(s)'
+
+        with unittest.mock.patch.object(METER, "read_container_logs", fake_logs):
+            METER.instance_client_count("valheim", "game-valheim-primary", "dk")
+            METER.instance_client_count("enshrouded", "game-enshrouded-primary", "dk")
+        self.assertEqual(captured["game-valheim-primary"], METER.DEFAULT_IDENTITY_WINDOW)
+        self.assertEqual(captured["game-enshrouded-primary"], "120s")
+
+    def test_an_idle_valheim_server_reads_as_empty_not_unknown(self) -> None:
+        # The running total persists: the most recent "now N player(s)" is still current however
+        # long ago it was printed, so a long window turns "unknown" back into a real zero.
+        quiet = "\n".join([
+            'Player connection lost server "W" that has join code 1, now 0 player(s)',
+            "Placed location WoodHouse6 in zone 0,-8",
+            "Update PlayFab entity token",
+        ])
+        self.assertEqual(METER.valheim_client_count(quiet), 0)
