@@ -14,6 +14,22 @@ These procedures are root-only unless stated otherwise. Keep the catalog, deploy
    `systemctl list-timers game-server-interface-backup.timer` and `journalctl -u game-server-interface-backup.service -n 50 --no-pager`.
 4. In the UI, confirm each live instance shows a recent verified backup. A missing or failed backup requires operator review before an image update.
 
+## A game server that looks stuck on "updating"
+
+Enshrouded fetches its server build from Steam at startup rather than shipping it in the image, so
+a start that appears hung is usually a download in progress. Check before intervening:
+
+    docker logs -f game-enshrouded-primary 2>&1 | grep -E "progress:|Success! App|ERROR"
+
+A line like `Update state (0x61) downloading, progress: 12.75 (1033108728 / 8102038331)` is healthy
+— it is working through 8.1GB. Stopping the unit at that point discards the partial download, and
+because `ExecStop` removes the container, the next start begins again from zero. Let it finish.
+
+With the install directory persisted (see
+[instance-provisioning.md](instance-provisioning.md)) a restart hash-validates local files instead,
+which takes minutes rather than a full transfer. A start that shows *no* progress lines for several
+minutes, or an `ERROR` from steamcmd, is a genuine failure worth investigating.
+
 ## Backup and recovery
 
 Scheduled backups run daily at 02:00 local time with up to 15 minutes of random delay. They invoke the existing root-owned `backup-game-data <template>-<instance>` and `verify-game-backup <template>-<instance>` commands. The scheduler stores only timestamp, verification result, and a bounded error summary in `/var/lib/game-server-interface/backup_status.json`; it never stores game secrets.

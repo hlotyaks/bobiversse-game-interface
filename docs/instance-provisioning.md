@@ -68,6 +68,29 @@ sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_c
    back to a tailnet heuristic that identifies nobody for a Steam-relayed game; see
    [usage-metering.md](usage-metering.md).
 
+## Enshrouded notes
+
+- **The install directory must be persisted.** The image ships **no** game install — its
+  `/home/steam/enshrouded` is 8KB of empty directory — and the entrypoint runs
+  `steamcmd +app_update <id> validate` on every start. Unmounted, that lands in the container's
+  writable layer, which the unit's `ExecStop` (`docker compose down`) destroys, so **every restart
+  re-downloaded 8.1GB** (measured 2026-10-15). It is bind-mounted from
+  `/srv/games/enshrouded-<instance>/server`, the directory the catalog's `required_directories`
+  always listed and nothing previously mounted.
+
+  The symptom was a restart that looked hung: the server appears to "stick on updating", because it
+  is two minutes into an 8GB transfer. Interrupting it looks like curing a hang and is actually
+  interrupting progress.
+
+- **The savegame mount nests inside the install mount** on purpose, so the world survives wiping
+  the install directory to force a clean re-download. Docker mounts parents before children, so it
+  layers on top rather than being hidden.
+
+- **A start is never instant, even persisted.** The entrypoint deletes Steam's
+  `appmanifest_*.acf` before updating, so `validate` always re-hashes the install rather than
+  trusting it. That is local disk work measured in minutes instead of an 8GB transfer, and a game
+  release becomes a delta, but it is not zero. Do not read a few minutes of "updating" as a hang.
+
 ## Valheim notes
 
 - **It starts as root on purpose.** The bootstrap runs `groupmod`, rewrites `/etc/passwd`, and
