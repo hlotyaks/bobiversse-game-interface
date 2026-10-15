@@ -30,6 +30,11 @@ let exclusions = null;
 let exclusionsLoaded = false;
 const trackedOperations = new Map();
 const consoleEntries = new Map();
+// Scroll position of each log console, by instance. render() rebuilds the DOM on every refresh and
+// a freshly created <pre> starts at scrollTop 0, so without this the log jumps back to the top
+// every 10 seconds while someone is reading it. `pinned` records that they were at the bottom, so
+// a live log keeps following new output rather than freezing where it was.
+const consoleScroll = new Map();
 
 function showPage(name) {
   if (!navItems.some((item) => item.dataset.page === name && !item.hidden)) name = 'controls';
@@ -78,6 +83,16 @@ function consoleKey(templateId, instanceId) {
 
 function trackedOperationFor(templateId, instanceId) {
   return [...trackedOperations.values()].find((operation) => operation.templateId === templateId && operation.instanceId === instanceId);
+}
+
+function restoreConsoleScroll() {
+  // Must run after the nodes are in the document: an element outside the layout has no
+  // scrollHeight, so assigning scrollTop before insertion silently does nothing.
+  catalogElement.querySelectorAll('.console-output[data-console-key]').forEach((output) => {
+    const saved = consoleScroll.get(output.dataset.consoleKey);
+    if (!saved) return;
+    output.scrollTop = saved.pinned ? output.scrollHeight : saved.top;
+  });
 }
 
 function render() {
@@ -148,6 +163,7 @@ function render() {
     });
     catalogElement.append(card);
   });
+  restoreConsoleScroll();
 }
 
 function connectionEndpoints(game, record) {
@@ -415,6 +431,14 @@ function logConsole(templateId, instanceId, entry = {}, inProgress = false) {
   const output = document.createElement('pre');
   output.className = 'console-output';
   output.textContent = Array.isArray(entry.lines) && entry.lines.length ? entry.lines.join('\n') : 'No journal output is available yet.';
+  const scrollKey = consoleKey(templateId, instanceId);
+  output.dataset.consoleKey = scrollKey;
+  output.addEventListener('scroll', () => {
+    // Within a few pixels of the bottom counts as "following", so rounding and sub-pixel heights
+    // do not unpin a log the reader is tailing.
+    const atBottom = output.scrollHeight - output.scrollTop - output.clientHeight <= 4;
+    consoleScroll.set(scrollKey, { top: output.scrollTop, pinned: atBottom });
+  });
   details.append(summary, status, output);
   details.addEventListener('toggle', () => {
     const key = consoleKey(templateId, instanceId);
