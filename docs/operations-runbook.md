@@ -30,6 +30,21 @@ With the install directory persisted (see
 which takes minutes rather than a full transfer. A start that shows *no* progress lines for several
 minutes, or an `ERROR` from steamcmd, is a genuine failure worth investigating.
 
+A different failure reads similarly but is not a download at all:
+
+    ERROR: Timed out waiting for server to be up and listening on UDP port 15636
+
+That is the image's 60-second budget for the server to bind its port, exhausted. It follows a
+successful `Success! App ... fully installed.`, so the download was fine and the *server* did not
+come up in time. Persisting the install and the Proton prefix is what keeps a start inside that
+budget; if it recurs with both persisted, the server itself is failing and its own log
+(`logs/enshrouded_server.log`, linked to stdout) is where to look.
+
+**A failed game start currently reports success to systemd.** `docker compose up` without
+`--abort-on-container-exit` returns 0 when the container stops, whatever the container's own exit
+code, so the unit records `Result=success` and `Restart=on-failure` never fires. Judge a start by
+the container log, not by the unit's result.
+
 ## Backup and recovery
 
 Scheduled backups run daily at 02:00 local time with up to 15 minutes of random delay. They invoke the existing root-owned `backup-game-data <template>-<instance>` and `verify-game-backup <template>-<instance>` commands. The scheduler stores only timestamp, verification result, and a bounded error summary in `/var/lib/game-server-interface/backup_status.json`; it never stores game secrets.

@@ -86,6 +86,13 @@ sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_c
   the install directory to force a clean re-download. Docker mounts parents before children, so it
   layers on top rather than being hidden.
 
+- **The Proton prefix is persisted too.** The server is a Windows binary run under Proton
+  (`STEAM_COMPAT_DATA_PATH=/home/steam/steamcmd/steamapps/compatdata/<appid>`), and the entrypoint
+  allows it exactly **60 seconds** (`for i in {1..30}` with `sleep 2`) to bind its UDP port before
+  printing `Timed out waiting for server to be up` and exiting 1. Building the prefix from scratch
+  on every start eats into that budget; on 2026-10-15 a cold start missed it, taking 58 of the 60
+  seconds and failing. Only the `compatdata` subtree is mounted, so steamcmd itself is untouched.
+
 - **A start is never instant, even persisted.** The entrypoint deletes Steam's
   `appmanifest_*.acf` before updating, so `validate` always re-hashes the install rather than
   trusting it. That is local disk work measured in minutes instead of an 8GB transfer, and a game
