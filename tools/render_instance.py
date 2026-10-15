@@ -114,6 +114,18 @@ def render_enshrouded(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
                         "target": "/home/steam/enshrouded/savegame",
                         "read_only": False,
                     },
+                    # The Proton prefix (STEAM_COMPAT_DATA_PATH). The server is a Windows binary
+                    # run under Proton, and building this prefix from scratch is a large part of
+                    # what makes a cold start slow -- which matters because the image's entrypoint
+                    # allows the server exactly 60s (30 x 2s) to bind its UDP port before giving up.
+                    # A start that exceeds it exits 1 and the server never comes up. Only the
+                    # compatdata subtree is mounted, so steamcmd itself is left alone.
+                    {
+                        "type": "bind",
+                        "source": f"{data_root}/compatdata",
+                        "target": "/home/steam/steamcmd/steamapps/compatdata",
+                        "read_only": False,
+                    },
                 ],
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges:true"],
@@ -223,7 +235,7 @@ VALHEIM_UID_GID = "10000:10000"
 PROVISIONING = {
     "enshrouded": {
         "uid_gid": "10000:10000",   # the image's fixed built-in UID; not configurable
-        "data_dirs": ["savegame", "server"],
+        "data_dirs": ["savegame", "server", "compatdata"],
         "secret_keys": ["SERVER_NAME", "SERVER_SLOTS", "SERVER_PASSWORD"],
     },
     "valheim": {

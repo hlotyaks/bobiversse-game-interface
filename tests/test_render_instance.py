@@ -204,9 +204,20 @@ class EnshroudedInstallPersistenceTests(unittest.TestCase):
         self.assertLess(targets.index("/home/steam/enshrouded"),
                         targets.index("/home/steam/enshrouded/savegame"))
 
+    def test_the_proton_prefix_is_persisted(self) -> None:
+        # The server is a Windows binary run under Proton. Rebuilding the prefix every start eats
+        # into the 60s the image's entrypoint allows before it gives up waiting for the UDP port.
+        prefix = self._mount("/home/steam/steamcmd/steamapps/compatdata")
+        self.assertIsNotNone(prefix, "Proton prefix is rebuilt on every start")
+        self.assertTrue(prefix["source"].endswith("/compatdata"))
+
+    def test_steamcmd_itself_is_not_shadowed(self) -> None:
+        # Mounting over /home/steam/steamcmd would hide the steamcmd install the entrypoint runs.
+        self.assertIsNone(self._mount("/home/steam/steamcmd"))
+
     def test_provisioning_creates_and_owns_the_install_directory(self) -> None:
         # Without this the mount would land on a root-owned directory the container cannot write.
         profile = RENDER.PROVISIONING["enshrouded"]
-        self.assertIn("server", profile["data_dirs"])
-        self.assertIn("savegame", profile["data_dirs"])
+        for required in ("server", "savegame", "compatdata"):
+            self.assertIn(required, profile["data_dirs"])
         self.assertEqual(profile["uid_gid"], "10000:10000")
