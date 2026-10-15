@@ -86,12 +86,19 @@ sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_c
   the install directory to force a clean re-download. Docker mounts parents before children, so it
   layers on top rather than being hidden.
 
-- **The Proton prefix is persisted too.** The server is a Windows binary run under Proton
-  (`STEAM_COMPAT_DATA_PATH=/home/steam/steamcmd/steamapps/compatdata/<appid>`), and the entrypoint
-  allows it exactly **60 seconds** (`for i in {1..30}` with `sleep 2`) to bind its UDP port before
-  printing `Timed out waiting for server to be up` and exiting 1. Building the prefix from scratch
-  on every start eats into that budget; on 2026-10-15 a cold start missed it, taking 58 of the 60
-  seconds and failing. Only the `compatdata` subtree is mounted, so steamcmd itself is untouched.
+- **Do not mount anything over the Proton prefix.** The server is a Windows binary run under
+  Proton (`STEAM_COMPAT_DATA_PATH=/home/steam/steamcmd/steamapps/compatdata/<appid>`). The image
+  ships `compatdata/<appid>` as an empty directory on purpose: Proton creates `pfx.lock` *inside*
+  it and expects Steam to have made the directory, so it does not create it itself. A bind mount at
+  `compatdata` hides that directory and Proton dies immediately:
+
+      FileNotFoundError: [Errno 2] No such file or directory:
+        '/home/steam/steamcmd/steamapps/compatdata/2278520/pfx.lock'
+
+  Which surfaces as the same `Timed out waiting for server to be up` as any other startup failure.
+  Tried and reverted on 2026-10-15, on the mistaken theory that building the prefix was what
+  exhausted the 60-second budget; an empty prefix directory is 8KB and building it is not the
+  bottleneck.
 
 - **A start is never instant, even persisted.** The entrypoint deletes Steam's
   `appmanifest_*.acf` before updating, so `validate` always re-hashes the install rather than
