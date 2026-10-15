@@ -183,3 +183,41 @@ class BillingIdentityResolutionTests(unittest.TestCase):
         legacy = {"users": {"alice@ex": {"hours": 1.0}}, "totals": {}}
         view = MODULE.filter_billing_for_actor(legacy, "alice@ex", is_admin=False)
         self.assertEqual(view["you"]["hours"], 1.0)
+
+
+class LogConsoleScrollTests(unittest.TestCase):
+    """The log pane must keep its place across the dashboard's 10-second refresh.
+
+    render() rebuilds the DOM on every refresh and logConsole() creates a fresh <pre> each time; a
+    new element starts at scrollTop 0, so the log jumped back to the top every 10 seconds while
+    someone was reading it. There is no JS test harness here, so these assert the wiring is present
+    rather than exercising it -- enough to catch it being removed.
+    """
+
+    APP_JS = (MODULE_PATH.parent / "static" / "app.js").read_text(encoding="utf-8")
+    APP_CSS = (MODULE_PATH.parent / "static" / "app.css").read_text(encoding="utf-8")
+
+    def test_the_pane_is_actually_scrollable(self) -> None:
+        # If this stops being a scrolling pane the preservation below is pointless.
+        self.assertRegex(self.APP_CSS, r"\.console-output\s*\{[^}]*overflow:\s*auto")
+        self.assertRegex(self.APP_CSS, r"\.console-output\s*\{[^}]*max-height")
+
+    def test_scroll_position_is_recorded_per_instance(self) -> None:
+        self.assertIn("consoleScroll", self.APP_JS)
+        self.assertIn("output.dataset.consoleKey", self.APP_JS)
+        self.assertIn("output.addEventListener('scroll'", self.APP_JS)
+
+    def test_scroll_position_is_restored_after_every_render(self) -> None:
+        self.assertIn("function restoreConsoleScroll()", self.APP_JS)
+        # Restoring before the nodes are in the document is a no-op, so the call has to come
+        # after the cards are appended rather than anywhere in render().
+        render_body = self.APP_JS[self.APP_JS.index("function render()"):]
+        render_body = render_body[:render_body.index("\nfunction ")]
+        self.assertIn("restoreConsoleScroll();", render_body)
+        self.assertLess(render_body.index("catalogElement.append(card)"),
+                        render_body.index("restoreConsoleScroll();"))
+
+    def test_a_log_being_tailed_stays_pinned_to_the_bottom(self) -> None:
+        # Preserving a raw offset would freeze a live log in place as new lines arrive.
+        self.assertIn("pinned", self.APP_JS)
+        self.assertIn("saved.pinned ? output.scrollHeight : saved.top", self.APP_JS)
