@@ -90,12 +90,42 @@ def render_enshrouded(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
                 "env_file": [f"{instance_dir}/{template}.env"],
                 "ports": _publish(bind_ip, resolved["ports"]),
                 "volumes": [
+                    # The game install itself, which the image does NOT ship: its
+                    # /home/steam/enshrouded is 8KB of empty directory, and the entrypoint fetches
+                    # the whole server from Steam on every start. Without this mount that landed in
+                    # the container's writable layer, which ExecStop's `compose down` discards --
+                    # so every restart re-downloaded 8.1GB, and the entrypoint deletes Steam's
+                    # appmanifest beforehand so it could not even tell what was already there.
+                    # Persisted, the download happens once and later starts hash-validate local
+                    # files instead; a game release becomes a delta.
+                    {
+                        "type": "bind",
+                        "source": f"{data_root}/server",
+                        "target": "/home/steam/enshrouded",
+                        "read_only": False,
+                    },
+                    # Nested inside the install path on purpose: savegame keeps its own mount so
+                    # the world survives even if the install directory is ever wiped to force a
+                    # clean re-download. Docker mounts parents before children, so this layers on
+                    # top of the install mount rather than being hidden by it.
                     {
                         "type": "bind",
                         "source": f"{data_root}/savegame",
                         "target": "/home/steam/enshrouded/savegame",
                         "read_only": False,
-                    }
+                    },
+                    # The Proton prefix (STEAM_COMPAT_DATA_PATH). The server is a Windows binary
+                    # run under Proton, and building this prefix from scratch is a large part of
+                    # what makes a cold start slow -- which matters because the image's entrypoint
+                    # allows the server exactly 60s (30 x 2s) to bind its UDP port before giving up.
+                    # A start that exceeds it exits 1 and the server never comes up. Only the
+                    # compatdata subtree is mounted, so steamcmd itself is left alone.
+                    {
+                        "type": "bind",
+                        "source": f"{data_root}/compatdata",
+                        "target": "/home/steam/steamcmd/steamapps/compatdata",
+                        "read_only": False,
+                    },
                 ],
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges:true"],
@@ -205,7 +235,7 @@ VALHEIM_UID_GID = "10000:10000"
 PROVISIONING = {
     "enshrouded": {
         "uid_gid": "10000:10000",   # the image's fixed built-in UID; not configurable
-        "data_dirs": ["savegame"],
+        "data_dirs": ["savegame", "server", "compatdata"],
         "secret_keys": ["SERVER_NAME", "SERVER_SLOTS", "SERVER_PASSWORD"],
     },
     "valheim": {

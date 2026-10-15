@@ -166,3 +166,58 @@ class ProvisioningProfileTests(unittest.TestCase):
         sources = {volume["source"].rsplit("/", 1)[-1]
                    for volume in yaml.safe_load(rendered["compose.yaml"])["services"]["server"]["volumes"]}
         self.assertEqual(sources, set(RENDER.PROVISIONING["valheim"]["data_dirs"]))
+
+
+class EnshroudedInstallPersistenceTests(unittest.TestCase):
+    """The game install must outlive the container.
+
+    The image ships no install -- its /home/steam/enshrouded is 8KB of empty directory -- and the
+    entrypoint fetches the whole server from Steam on every start. Unmounted, that lands in the
+    container's writable layer, which ExecStop's `compose down` destroys, so every restart
+    re-downloaded 8.1GB (measured 2026-10-15).
+    """
+
+    def setUp(self) -> None:
+        self.service = yaml.safe_load(
+            RENDER.render(CATALOG, "enshrouded", "primary", "100.84.161.38")["compose.yaml"]
+        )["services"]["server"]
+
+    def _mount(self, target):
+        return next((v for v in self.service["volumes"] if v["target"] == target), None)
+
+    def test_the_install_directory_is_persisted(self) -> None:
+        install = self._mount("/home/steam/enshrouded")
+        self.assertIsNotNone(install, "game install is not bind-mounted; every restart re-downloads")
+        self.assertTrue(install["source"].endswith("/server"))
+        self.assertFalse(install["read_only"])
+
+    def test_the_savegame_stays_separately_mounted_inside_it(self) -> None:
+        # Nested on purpose: the world must survive wiping the install to force a clean re-download.
+        savegame = self._mount("/home/steam/enshrouded/savegame")
+        self.assertIsNotNone(savegame)
+        self.assertTrue(savegame["source"].endswith("/savegame"))
+
+    def test_parent_is_declared_before_the_nested_child(self) -> None:
+        # Docker mounts parents first regardless, but declaration order reflects the dependency
+        # and keeps the rendered file readable.
+        targets = [v["target"] for v in self.service["volumes"]]
+        self.assertLess(targets.index("/home/steam/enshrouded"),
+                        targets.index("/home/steam/enshrouded/savegame"))
+
+    def test_the_proton_prefix_is_persisted(self) -> None:
+        # The server is a Windows binary run under Proton. Rebuilding the prefix every start eats
+        # into the 60s the image's entrypoint allows before it gives up waiting for the UDP port.
+        prefix = self._mount("/home/steam/steamcmd/steamapps/compatdata")
+        self.assertIsNotNone(prefix, "Proton prefix is rebuilt on every start")
+        self.assertTrue(prefix["source"].endswith("/compatdata"))
+
+    def test_steamcmd_itself_is_not_shadowed(self) -> None:
+        # Mounting over /home/steam/steamcmd would hide the steamcmd install the entrypoint runs.
+        self.assertIsNone(self._mount("/home/steam/steamcmd"))
+
+    def test_provisioning_creates_and_owns_the_install_directory(self) -> None:
+        # Without this the mount would land on a root-owned directory the container cannot write.
+        profile = RENDER.PROVISIONING["enshrouded"]
+        for required in ("server", "savegame", "compatdata"):
+            self.assertIn(required, profile["data_dirs"])
+        self.assertEqual(profile["uid_gid"], "10000:10000")
