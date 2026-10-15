@@ -40,6 +40,11 @@ come up in time. Persisting the install and the Proton prefix is what keeps a st
 budget; if it recurs with both persisted, the server itself is failing and its own log
 (`logs/enshrouded_server.log`, linked to stdout) is where to look.
 
+**Enshrouded is currently blocked upstream (2026-10-15).** If the server will not start and the log
+shows `Failed to initialize Steamworks system...Version Mismatch` / `No SteamUtils011`, that is the
+known Enshrouded 1.0 incompatibility and nothing on this host can fix it. See
+[enshrouded-1.0-outage.md](enshrouded-1.0-outage.md) before investigating.
+
 **A failed game start currently reports success to systemd.** `docker compose up` without
 `--abort-on-container-exit` returns 0 when the container stops, whatever the container's own exit
 code, so the unit records `Result=success` and `Restart=on-failure` never fires. Judge a start by
