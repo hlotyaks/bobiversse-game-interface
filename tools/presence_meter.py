@@ -313,6 +313,14 @@ def enshrouded_client_count(log_text: str) -> int | None:
 # replaying add/drop events yields exactly who is connected now.
 ENSHROUDED_PEER_ADD = re.compile(r"\[online\] Added peer (\S+) \(steamid:(\d+)\)")
 ENSHROUDED_PEER_DROP = re.compile(r"\[online\] (?:Removed peer|Timeout for peer) (\S+)")
+# The game prints this on every launch, and handles restart from scratch after it. It matters
+# because the current image runs the server under supervisord, which relaunches it in place: a
+# crash-restart no longer ends the container, so the window can hold a dead session's "Added peer"
+# with no matching drop, and replaying across the boundary would bill whoever was connected before
+# the crash for up to a full window of absence. Resetting on the marker scopes the replay to the
+# live session. (Under the previous image a restart replaced the container and its log, so this
+# could not arise.)
+ENSHROUDED_SERVER_START = re.compile(r"\[app\] start creation step Init_Steamworks")
 
 
 def enshrouded_connected_players(log_text: str) -> list[str]:
@@ -328,9 +336,17 @@ def enshrouded_connected_players(log_text: str) -> list[str]:
     absent. That under-reports rather than misattributes, and the occupancy count -- read separately
     from the game's own Session block -- still reflects them, so the shortfall surfaces on the bill
     as UNATTRIBUTED instead of hiding.
+
+    A server launch inside the window discards everything before it: peer handles are unique only
+    within one run of the game, and the current image relaunches the server inside a surviving
+    container, so carrying a pre-restart session forward would attribute play to people who had
+    already been disconnected by the crash.
     """
     live: dict[str, str] = {}
     for line in log_text.splitlines():
+        if ENSHROUDED_SERVER_START.search(line):
+            live.clear()
+            continue
         added = ENSHROUDED_PEER_ADD.search(line)
         if added:
             live[added.group(1)] = added.group(2)
