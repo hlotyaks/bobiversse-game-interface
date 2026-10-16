@@ -68,13 +68,6 @@ install -d -o root -g root -m 0755 "${instances_root}" "${instance_dir}"
 if [[ -f "${secret_env}" ]]; then
     echo "Secret env ${secret_env} already exists; keeping it. Delete it to re-enter values."
 else
-    default_slots=$(python3 - "$catalog" "$template" <<'PY'
-import sys, yaml
-catalog, template = sys.argv[1], sys.argv[2]
-data = yaml.safe_load(open(catalog, encoding="utf-8"))
-print(min(int(data["templates"][template].get("supported_players", 16)), 16))
-PY
-)
     printf 'Configuring %s. Values are stored root-only at %s\n' "${account}" "${secret_env}"
     umask 077
     : >"${secret_env}"
@@ -87,10 +80,6 @@ PY
             WORLD_NAME)
                 read -r -p "World name [${account}]: " value </dev/tty || true
                 value=${value:-${account}}
-                ;;
-            SERVER_SLOTS)
-                read -r -p "Player slots (max 16) [${default_slots}]: " value </dev/tty || true
-                value=${value:-${default_slots}}
                 ;;
             SERVER_PASSWORD|SERVER_PASS)
                 # Both Enshrouded and Valheim reject passwords shorter than five characters, and

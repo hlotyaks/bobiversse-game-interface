@@ -91,7 +91,7 @@ templates:
   enshrouded:
     display_name: Enshrouded
     description: Dedicated Enshrouded world for private tailnet players.
-    documentation_url: https://github.com/sknnr/enshrouded-dedicated-server
+    documentation_url: https://github.com/mornedhels/enshrouded-server
     enabled: true
     supported_players: 16
     connection:
@@ -102,12 +102,17 @@ templates:
       protocol: udp
       password_guidance: Set the server password only in the instance secret file; never add it to this catalog.
     image:
-      # Linux/amd64 manifest resolved from the upstream latest tag on 2026-07-12.
-      reference: sknnr/enshrouded-dedicated-server
-      digest: sha256:269698c5ae61c4cbf01b9ea8473e84b4ff0b98c843842c60ee6a0a22fca0786e
-      source_tag: latest
-      source_url: https://hub.docker.com/r/sknnr/enshrouded-dedicated-server
-      approved_at: "2026-07-12"
+      # Migrated off sknnr/enshrouded-dedicated-server on 2026-10-16. That image is abandoned --
+      # last built 2026-01-02, source repository deleted -- and Enshrouded 1.0 does not run under
+      # the GE-Proton 10-26 it bundles at all (docs/enshrouded-1.0-outage.md). This image is
+      # maintained, and its 1.8.0 release carries the fix: Ubuntu 26 base, GE-Proton 11-5 and
+      # libvulkan1. Verified on this host before approval: Steamworks initialises, the existing
+      # world loads, and the server reaches HostOnline in ~20s.
+      reference: mornedhels/enshrouded-server
+      digest: sha256:689dcb30037b0c63e6929b2fe5951eaf8eca52a43792b2764440baeb012b2aa1
+      source_tag: 1.8.0-proton
+      source_url: https://hub.docker.com/r/mornedhels/enshrouded-server
+      approved_at: "2026-10-16"
     startup:
       health_check: UDP gameplay/query-port probe plus a successful server-start log event
       timeout_seconds: 1200

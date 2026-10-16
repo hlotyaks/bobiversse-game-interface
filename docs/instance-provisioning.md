@@ -70,13 +70,17 @@ sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_c
 
 ## Enshrouded notes
 
-- **The install directory must be persisted.** The image ships **no** game install — its
-  `/home/steam/enshrouded` is 8KB of empty directory — and the entrypoint runs
-  `steamcmd +app_update <id> validate` on every start. Unmounted, that lands in the container's
-  writable layer, which the unit's `ExecStop` (`docker compose down`) destroys, so **every restart
-  re-downloaded 8.1GB** (measured 2026-10-15). It is bind-mounted from
-  `/srv/games/enshrouded-<instance>/server`, the directory the catalog's `required_directories`
-  always listed and nothing previously mounted.
+The image is `mornedhels/enshrouded-server` (migrated 2026-10-16). The previous image,
+`sknnr/enshrouded-dedicated-server`, is abandoned — last built 2026-01-02, source repository
+deleted — and Enshrouded 1.0 does not run under the GE-Proton it bundles at all; see
+[enshrouded-1.0-outage.md](enshrouded-1.0-outage.md).
+
+- **The install directory must be persisted.** The image ships **no** game install and its
+  entrypoint runs `steamcmd +app_update <id> validate` on every start. Unmounted, that lands in the
+  container's writable layer, which the unit's `ExecStop` (`docker compose down`) destroys, so
+  **every restart re-downloaded 8.1GB** (measured 2026-10-15). It is bind-mounted from
+  `/srv/games/enshrouded-<instance>/server` to the image's own `install_path`,
+  `/opt/enshrouded/server`.
 
   The symptom was a restart that looked hung: the server appears to "stick on updating", because it
   is two minutes into an 8GB transfer. Interrupting it looks like curing a hang and is actually
@@ -86,24 +90,52 @@ sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_c
   the install directory to force a clean re-download. Docker mounts parents before children, so it
   layers on top rather than being hidden.
 
+- **It starts as root on purpose.** The bootstrap runs `groupmod`/`usermod`, rewrites
+  `/etc/passwd`, and `chown -R`s its data tree before supervisord drops to `PUID:PGID`. A blanket
+  `cap_drop: [ALL]` breaks it at startup, so the adapter drops everything and adds back exactly
+  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`. A `user:` override would also break it.
+  `PUID:PGID` is `10000:10000` — arbitrary to the image, but it owns the existing 7.5GB data tree,
+  so keeping it means the migration needed no chown.
+
+- **`SERVER_QUERYPORT`, not `PORT` or `SERVER_PORT`.** Enshrouded has a single port, the config's
+  `queryPort`, which is also the port players connect to. This image reads it from
+  `SERVER_QUERYPORT`; its `SERVER_PORT` is deprecated and only warns, and the old image's `PORT` is
+  not read at all. The player cap comes from the catalog as `SERVER_SLOT_COUNT`, not from the
+  secret env file (the old `SERVER_SLOTS` key is unread — a stale copy is harmless).
+
+- **Delete any `logs/enshrouded_server.log` symlink left by the old image.** The old image created
+  it pointing at `/proc/1/fd/1` so the game's file log reached container stdout. It persists in the
+  install directory, and under this image the game runs as uid 10000 while PID 1 is root, so
+  opening it is denied and the server exits one second in with
+
+      [enshrouded] Could not open log file, error no permission
+
+  Removing the symlink is the whole fix; the game then writes a real log file and still prints the
+  same lines to stdout, which is what the usage meter reads. Instances provisioned from scratch
+  never have it.
+
 - **Do not mount anything over the Proton prefix.** The server is a Windows binary run under
-  Proton (`STEAM_COMPAT_DATA_PATH=/home/steam/steamcmd/steamapps/compatdata/<appid>`). The image
-  ships `compatdata/<appid>` as an empty directory on purpose: Proton creates `pfx.lock` *inside*
-  it and expects Steam to have made the directory, so it does not create it itself. A bind mount at
-  `compatdata` hides that directory and Proton dies immediately:
+  Proton, whose prefix lives at `<install_path>/steamapps/compatdata/<appid>` — already inside the
+  install mount, so it persists without a mount of its own. Giving it one is what broke the server
+  on 2026-10-15: a bind mount at `compatdata` hid the directory Proton creates `pfx.lock` in, and
+  Proton died with
 
-      FileNotFoundError: [Errno 2] No such file or directory:
-        '/home/steam/steamcmd/steamapps/compatdata/2278520/pfx.lock'
+      FileNotFoundError: [Errno 2] No such file or directory: '.../compatdata/2278520/pfx.lock'
 
-  Which surfaces as the same `Timed out waiting for server to be up` as any other startup failure.
-  Tried and reverted on 2026-10-15, on the mistaken theory that building the prefix was what
-  exhausted the 60-second budget; an empty prefix directory is 8KB and building it is not the
-  bottleneck.
+  which surfaced as a generic startup timeout. Tried and reverted, on the mistaken theory that
+  building the prefix was what exhausted the old image's 60-second budget; an empty prefix is 8KB
+  and building it is not the bottleneck.
 
-- **A start is never instant, even persisted.** The entrypoint deletes Steam's
-  `appmanifest_*.acf` before updating, so `validate` always re-hashes the install rather than
-  trusting it. That is local disk work measured in minutes instead of an 8GB transfer, and a game
-  release becomes a delta, but it is not zero. Do not read a few minutes of "updating" as a hang.
+- **A start is never instant, even persisted.** `STEAMCMD_ARGS` defaults to `public validate`, so
+  every start re-hashes the install rather than trusting it. That is local disk work measured in
+  tens of seconds to minutes instead of an 8GB transfer, and a game release becomes a delta, but it
+  is not zero. Do not read a few minutes of "updating" as a hang. Measured 2026-10-16 on a
+  persisted install: container start to `HostOnline` in about 20 seconds.
+
+- **A dead server no longer stops the container.** supervisord restarts the server a few times and
+  then parks it in `FATAL` state, so the container stays up with nothing serving. Look for
+  `entered FATAL state, too many start retries too quickly`; container liveness is not a health
+  signal for this image.
 
 ## Valheim notes
 
@@ -148,14 +180,15 @@ sudo -u game-interface-api /usr/local/libexec/game-server-interface/controller_c
 
 ## Security model notes
 
-- **Container UID.** `sknnr/enshrouded-dedicated-server` runs as its built-in non-root
-  UID/GID `10000:10000` and cannot take an arbitrary UID without rebuilding (which would break
-  the pinned digest). The instance therefore runs as `10000:10000` with the savegame directory
-  chowned to match. Isolation is enforced through `cap_drop: [ALL]`, `no-new-privileges`,
+- **Container UID.** Both game images start as root and drop to `PUID:PGID` themselves, so the
+  Compose services set no `user:`. Enshrouded keeps `10000:10000` — the UID its previous image
+  hardcoded, and the owner of the existing instance data — and Valheim uses the same, with the
+  data directories chowned to match. Isolation is enforced through `cap_drop: [ALL]` plus the
+  narrow add-back each image's bootstrap needs, `no-new-privileges`,
   Compose/systemd CPU and memory limits, `pids_limit`, and tailnet-only port publishing rather
   than a per-game host UID. Do not enable daemon-wide userns-remap on this live host without a
   planned maintenance window; it affects the already-running interface container.
-- **Secrets.** `SERVER_PASSWORD` (and the operator-chosen `SERVER_NAME`/`SERVER_SLOTS`) live
+- **Secrets.** `SERVER_PASSWORD` (and the operator-chosen `SERVER_NAME`) live
   only in `/etc/game-server-interface/instances/<instance>/<template>.env`, `0600 root:root`,
   referenced by the Compose `env_file`. They never enter the catalog, the rendered Compose,
   or logs (the controller's log reader also redacts secret-looking lines).

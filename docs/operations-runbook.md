@@ -30,25 +30,37 @@ With the install directory persisted (see
 which takes minutes rather than a full transfer. A start that shows *no* progress lines for several
 minutes, or an `ERROR` from steamcmd, is a genuine failure worth investigating.
 
-A different failure reads similarly but is not a download at all:
+A healthy Enshrouded start ends with these lines, and is the thing to look for:
 
-    ERROR: Timed out waiting for server to be up and listening on UDP port 15636
+    [online] Server connected to Steam successfully
+    [Session] 'HostOnline' (up)!
 
-That is the image's 60-second budget for the server to bind its port, exhausted. It follows a
-successful `Success! App ... fully installed.`, so the download was fine and the *server* did not
-come up in time. Persisting the install and the Proton prefix is what keeps a start inside that
-budget; if it recurs with both persisted, the server itself is failing and its own log
-(`logs/enshrouded_server.log`, linked to stdout) is where to look.
+**A dead Enshrouded server leaves its container running.** The image runs supervisord, which
+restarts the game a few times and then parks it:
 
-**Enshrouded is currently blocked upstream (2026-10-15).** If the server will not start and the log
-shows `Failed to initialize Steamworks system...Version Mismatch` / `No SteamUtils011`, that is the
-known Enshrouded 1.0 incompatibility and nothing on this host can fix it. See
-[enshrouded-1.0-outage.md](enshrouded-1.0-outage.md) before investigating.
+    INFO gave up: enshrouded-server entered FATAL state, too many start retries too quickly
+
+The container stays up with nothing serving, so container liveness is not a health signal. Judge it
+by `HostOnline` in the log, or by the dashboard's health check.
+
+If the log shows `Failed to initialize Steamworks system...Version Mismatch` / `No SteamUtils011`,
+that is the Enshrouded 1.0 Proton incompatibility that took the server down on 2026-10-15 and was
+resolved on 2026-10-16 by migrating images. Seeing it again means the running image regressed to an
+older Proton — check the digest against the catalog before investigating anything else, and read
+[enshrouded-1.0-outage.md](enshrouded-1.0-outage.md).
+
+If the server exits about a second after launch with
+
+    [enshrouded] Could not open log file, error no permission
+
+a stale `logs/enshrouded_server.log` symlink from the old image is in the install directory; delete
+it. Details in [instance-provisioning.md](instance-provisioning.md).
 
 **A failed game start currently reports success to systemd.** `docker compose up` without
 `--abort-on-container-exit` returns 0 when the container stops, whatever the container's own exit
-code, so the unit records `Result=success` and `Restart=on-failure` never fires. Judge a start by
-the container log, not by the unit's result.
+code, so the unit records `Result=success` and `Restart=on-failure` never fires. With this image a
+failed game start usually does not stop the container at all (see above), so the unit looks healthy
+either way. Judge a start by the container log, not by the unit's result.
 
 ## Backup and recovery
 
