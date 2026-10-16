@@ -80,10 +80,24 @@ mounted and an isolated copy of the world:
     [Session] 'HostOnline' (up)!
 
 About 20 seconds from container start to `HostOnline`, under the same narrow capability set the
-rendered Compose file uses. The existing EA-era savegame was picked up as-is — the 1.0 build logs
-`[savedata2-migration] Found file '3ad85aea'…` and indexes the rolling saves in place, so no
-savegame conversion was needed and the file name the metering code and backups rely on is
-unchanged.
+rendered Compose file uses.
+
+**The 1.0 build converts the savegame, and it did so on the live world.** The EA-era save was
+picked up (`[savedata2-migration] Found file '3ad85aea'…`), deserialized in 2.98s, and rewritten in
+the new format:
+
+    savegame/world0.ksd                 the live world (1.6MB)
+    savegame/migrated/3ad85aea*         the EA files, moved aside intact
+    savegame/backup/world0.ksd.backup-N the game's own rolling backups, now of world0.ksd
+
+Nothing is lost — the old files are preserved under `migrated/` — but the conversion is **one-way**:
+once `world0.ksd` exists, the EA-era server cannot read the world's current state, so rolling back
+to the old image means rolling back to the pre-migration save and losing any play since. That
+tarball is at `/srv/games/enshrouded-primary/savegame-pre-1.0-migration.tar.gz`.
+
+The rolling-save *file names* therefore changed, which matters only for restores: nothing in this
+repo keys on them. The usage meter reads the game's log through `docker logs`, not the save, and
+backups archive the directory.
 
 One migration trap, found by testing rather than reasoning: the **old image left a
 `logs/enshrouded_server.log` symlink to `/proc/1/fd/1`** in the persisted install directory. It
@@ -94,7 +108,11 @@ uid 10000 while PID 1 is root, so opening it is denied and the server exits one 
 
 which looks exactly like a fresh image bug and is not one. Deleting the stale symlink fixes it; the
 new image lets the game write a real log file and still carries the same lines on stdout, which is
-what the usage meter reads. A future instance provisioned from scratch never has the symlink.
+what the usage meter reads. A future instance provisioned from scratch never has the symlink — but
+**the old image recreates it on every start**, so if it ever runs again it has to be deleted again
+before the new image will start. That happened during this very migration: the instance was
+re-provisioned before the new catalog had reached the host, so the old image started once, put the
+symlink back, and the first start on the new image failed on it.
 
 Metering was re-verified against the new image's output rather than assumed: the game's
 `Session`/`Machines:` block and its `[online] Added peer … (steamid:…)` lines pass through the new

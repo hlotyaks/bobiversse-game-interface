@@ -112,7 +112,14 @@ deleted — and Enshrouded 1.0 does not run under the GE-Proton it bundles at al
 
   Removing the symlink is the whole fix; the game then writes a real log file and still prints the
   same lines to stdout, which is what the usage meter reads. Instances provisioned from scratch
-  never have it.
+  never have it — but the old image recreates it on every start, so after any start on that image
+  (a rollback, or a stale Compose file) it has to be deleted again.
+
+- **The world is in the 1.0 format now.** The 1.0 build converted it on first start: the live world
+  is `savegame/world0.ksd`, the EA-era rolling files were moved intact to `savegame/migrated/`, and
+  the game keeps its own rolling backups in `savegame/backup/`. The conversion is one-way, so a
+  rollback to the old image also means rolling back the world to
+  `/srv/games/enshrouded-primary/savegame-pre-1.0-migration.tar.gz`.
 
 - **Do not mount anything over the Proton prefix.** The server is a Windows binary run under
   Proton, whose prefix lives at `<install_path>/steamapps/compatdata/<appid>` — already inside the
