@@ -85,6 +85,11 @@ def main() -> int:
     parser.add_argument("--conntrack-bin", default="/usr/sbin/conntrack")
     parser.add_argument("--identities-file", type=Path,
                         default=Path("/var/lib/game-server-interface/player-identities.json"))
+    # Same default as the meter's, so the observer's "would name" matches what the meter actually
+    # writes. Without it an excluded admin shows as attributed here and absent from the ledger,
+    # which reads as a metering bug that is not one.
+    parser.add_argument("--exclusions-file", type=Path,
+                        default=Path("/var/lib/game-server-interface/presence-exclusions.json"))
     parser.add_argument("--log-jsonl", type=Path, nargs="?", const=DEFAULT_LOG, default=None,
                         metavar="PATH",
                         help=f"append structured records to PATH (default {DEFAULT_LOG}) instead of "
@@ -142,7 +147,8 @@ def main() -> int:
         game_players = pm.instance_connected_players(args.template, CONTAINER, args.docker_bin,
                                                      pm.DEFAULT_IDENTITY_WINDOW) or []
         unmapped = sorted(pid for pid in game_players if pid not in identities)
-        would = sorted({identities[pid] for pid in game_players if pid in identities})
+        excluded = pm.load_exclusions(args.exclusions_file).get(args.template, frozenset())
+        would = pm.attributed_names(identities, game_players, excluded)
         unnamed = (count - len(would)) if count is not None else None
         # Shadow the superseded tailnet heuristics. Both are blind to Steam-relayed play, so they
         # are expected to name nobody; keeping them recorded makes that plain rather than assumed.

@@ -146,6 +146,60 @@ class EnshroudedOccupancyTests(unittest.TestCase):
         self.assertIsNone(METER.enshrouded_client_count("[I 00:00:01,000] [server] Saved\n"))
 
 
+class AttributedNamesTests(unittest.TestCase):
+    """The one definition of "who the game's connected IDs bill as", shared with the observer.
+
+    The regression this guards: the observer had its own copy that built a set of the identity
+    *entries*. When an entry grew from a bare login string into {"name", "login", "characters"},
+    that copy started raising TypeError -- but only while a mapped player was connected, so the
+    observer died exactly when it mattered and looked healthy whenever nobody was online. It was
+    blind from 2026-09-30 to 2026-10-16 before anyone noticed.
+    """
+
+    IDENTITIES = {
+        "111": {"name": "Gronk", "login": "gronk@ex", "characters": {}},
+        "222": {"name": "Talian", "login": "", "characters": {}},
+        "333": {"name": "Stephen", "login": "admin@ex", "characters": {}},
+    }
+
+    def test_maps_connected_ids_to_billing_names(self) -> None:
+        self.assertEqual(METER.attributed_names(self.IDENTITIES, ["111", "222"]),
+                         ["Gronk", "Talian"])
+
+    def test_entries_are_structured_not_hashable(self) -> None:
+        # Guards the exact crash: a set built over the entries themselves would raise here.
+        self.assertEqual(METER.attributed_names(self.IDENTITIES, ["111"]), ["Gronk"])
+
+    def test_an_unmapped_id_yields_no_name(self) -> None:
+        # Under-reports on purpose: the gap reaches the bill as UNATTRIBUTED, never a guess.
+        self.assertEqual(METER.attributed_names(self.IDENTITIES, ["111", "999"]), ["Gronk"])
+
+    def test_exclusion_matches_the_login(self) -> None:
+        # The dashboard only accepts logins as exclusions, so a name-only check would never match.
+        self.assertEqual(
+            METER.attributed_names(self.IDENTITIES, ["111", "333"], frozenset({"admin@ex"})),
+            ["Gronk"])
+
+    def test_exclusion_matches_the_in_game_name_too(self) -> None:
+        self.assertEqual(
+            METER.attributed_names(self.IDENTITIES, ["111", "222"], frozenset({"Talian"})),
+            ["Gronk"])
+
+    def test_a_player_without_a_login_is_not_excluded_by_an_empty_entry(self) -> None:
+        # Talian has no login; an exclusion list containing "" must not silently drop them.
+        self.assertEqual(METER.attributed_names(self.IDENTITIES, ["222"], frozenset({""})),
+                         ["Talian"])
+
+    def test_nobody_connected_and_unknown_both_name_nobody(self) -> None:
+        self.assertEqual(METER.attributed_names(self.IDENTITIES, []), [])
+        self.assertEqual(METER.attributed_names(self.IDENTITIES, None), [])
+
+    def test_two_ids_of_one_person_collapse(self) -> None:
+        identities = dict(self.IDENTITIES, **{"444": {"name": "Gronk", "login": "gronk@ex",
+                                                      "characters": {}}})
+        self.assertEqual(METER.attributed_names(identities, ["111", "444"]), ["Gronk"])
+
+
 class AttributionTests(unittest.TestCase):
     def test_ewma_ranks_by_smoothed_rate(self) -> None:
         current = {"a@ex": {"bytes": 5_000_000}, "b@ex": {"bytes": 2_000_000}, "c@ex": {"bytes": 1_010_000}}
