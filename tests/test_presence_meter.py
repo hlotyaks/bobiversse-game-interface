@@ -469,6 +469,25 @@ class GameLogIdentityTests(unittest.TestCase):
                          "[online] Added peer 0(2) (steamid:111)"])
         self.assertEqual(METER.enshrouded_connected_players(log), ["111"])
 
+    def test_a_server_relaunch_inside_the_window_discards_the_dead_session(self) -> None:
+        # The image runs the server under supervisord, which relaunches it inside a surviving
+        # container, so a crash-restart leaves a dangling "Added peer" with no drop. Billing
+        # whoever the crash disconnected would be a silent over-charge.
+        log = "\n".join([
+            "[online] Added peer 0(1) (steamid:111)",
+            "[online] Added peer 0(2) (steamid:222)",
+            "supervisord: enshrouded-server [app] start creation step Init_Steamworks",
+            "[online] Added peer 0(1) (steamid:333)",
+        ])
+        self.assertEqual(METER.enshrouded_connected_players(log), ["333"])
+
+    def test_a_launch_with_nobody_back_yet_names_nobody(self) -> None:
+        log = "\n".join([
+            "[online] Added peer 0(1) (steamid:111)",
+            "supervisord: enshrouded-server [app] start creation step Init_Steamworks",
+        ])
+        self.assertEqual(METER.enshrouded_connected_players(log), [])
+
     def test_identity_map_loading(self) -> None:
         import tempfile, json
         from pathlib import Path

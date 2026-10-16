@@ -1,7 +1,10 @@
-# Enshrouded 1.0 outage (2026-10-15): the server cannot start, and why
+# Enshrouded 1.0 outage (2026-10-15 to 2026-10-16): the server could not start, and why
 
-**Status: blocked upstream.** No available image runs Enshrouded 1.0. This is not a configuration
-problem with this deployment and cannot be fixed here. Written up so it is not re-diagnosed.
+**Status: resolved 2026-10-16** by migrating to `mornedhels/enshrouded-server` 1.8.0-proton, which
+was released that evening with the upstream fix (Ubuntu 26 base, GE-Proton 11-5, `libvulkan1`). The
+diagnosis below is kept because it is the reason the image changed, and so none of it is
+re-diagnosed if a future game update looks similar. See
+[Resolution](#resolution-2026-10-16) at the end.
 
 ## Symptom
 
@@ -27,7 +30,7 @@ Steamworks interface, which **GE-Proton 10-26 cannot bridge**. Upstream's fix is
 
 ## Why it cannot be fixed here
 
-- **Our image is abandoned.** `sknnr/enshrouded-dedicated-server` was last built **2026-01-02**;
+- **The image we were on is abandoned.** `sknnr/enshrouded-dedicated-server` was last built **2026-01-02**;
   its newest tag (`proton-v2.3.2` = `proton-latest` = `latest`, digest `c410b742`) dates from then,
   and its GitHub repository returns 404. The pinned digest and `latest` are the *same build*:
   identical entrypoint, identical example config, identical bundled `steamclient.so`, identical
@@ -59,18 +62,57 @@ Each of these looked plausible and was tested rather than assumed:
 | A newer image of the same project would fix it | `latest` is the same build as the pinned digest |
 | Proton rebuilds its prefix slowly, exhausting the 60s | No — an empty prefix is 8KB; a bind mount there *broke* it instead (see instance-provisioning.md) |
 
-## Options
+## Resolution (2026-10-16)
 
-1. **Wait for mornedhels to release.** Their fix is in progress today. Lowest effort; unknown but
-   probably short timeline.
-2. **Migrate to mornedhels/enshrouded-server once released.** Worth doing regardless of this
-   outage: our current image is abandoned with its source deleted, so the next game update breaks
-   us again with nobody to fix it. Needs a new catalog entry (image, digest, `approved_at`), a new
-   Compose adapter, and a savegame migration — their layout is `/opt/enshrouded/savegame`.
-3. **Build our own image.** Full control, ongoing maintenance burden.
+Upstream released **1.8.0** at 19:46 UTC, closing issue #254. The fix is in
+[PR #252](https://github.com/mornedhels/enshrouded-server/pull/252): Ubuntu 26 base image,
+GE-Proton **11-5**, and `libvulkan1` — the package whose absence made mounting Proton 11 into the
+old image fail. We migrated to `mornedhels/enshrouded-server:1.8.0-proton`
+(`sha256:689dcb30…`) rather than waiting for a sknnr rebuild that is never coming.
 
-## What is safe
+Verified on this host before the catalog digest was approved, with the real install directory
+mounted and an isolated copy of the world:
 
-The world is intact: `/srv/games/enshrouded-primary/savegame`, 7.6MB with rolling backups. Nothing
-in this outage touched it, and the install directory now persists across restarts, so recovering
-costs no re-download.
+    [app] start creation step Init_Steamworks
+    Game Version (SVN): 1269579
+    [online] Server connected to Steam successfully
+    [online] Server SteamId: 90295057295641613
+    [Session] 'HostOnline' (up)!
+
+About 20 seconds from container start to `HostOnline`, under the same narrow capability set the
+rendered Compose file uses. The existing EA-era savegame was picked up as-is — the 1.0 build logs
+`[savedata2-migration] Found file '3ad85aea'…` and indexes the rolling saves in place, so no
+savegame conversion was needed and the file name the metering code and backups rely on is
+unchanged.
+
+One migration trap, found by testing rather than reasoning: the **old image left a
+`logs/enshrouded_server.log` symlink to `/proc/1/fd/1`** in the persisted install directory. It
+exists so the game's file log lands on container stdout. Under the new image the game runs as
+uid 10000 while PID 1 is root, so opening it is denied and the server exits one second in with
+
+    [enshrouded] Could not open log file, error no permission
+
+which looks exactly like a fresh image bug and is not one. Deleting the stale symlink fixes it; the
+new image lets the game write a real log file and still carries the same lines on stdout, which is
+what the usage meter reads. A future instance provisioned from scratch never has the symlink.
+
+Metering was re-verified against the new image's output rather than assumed: the game's
+`Session`/`Machines:` block and its `[online] Added peer … (steamid:…)` lines pass through the new
+image's syslog prefix intact, and `tools/presence_meter.py` parses a complete block from it
+unchanged. See [usage-metering.md](usage-metering.md).
+
+### Operational difference worth knowing
+
+Under the old image, a server that failed to launch took the container down with it. The new image
+runs supervisord, which restarts the server a few times and then parks it in `FATAL` state — so a
+**dead server leaves the container running**. Watch for `entered FATAL state, too many start
+retries too quickly` in the logs; the dashboard's own health check, not container liveness, is what
+tells you the game is down.
+
+## What was safe throughout
+
+The world was never at risk: `/srv/games/enshrouded-primary/savegame`, 7.6MB with the game's own
+rolling saves. Nothing in the outage or the migration touched it — the migration was tested against
+a copy, and a tarball snapshot was taken first at
+`/srv/games/enshrouded-primary/savegame-pre-1.0-migration.tar.gz`. The install directory persists
+across restarts, so recovery costs no re-download.

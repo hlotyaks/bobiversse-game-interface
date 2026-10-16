@@ -30,12 +30,20 @@ class RenderEnshroudedTests(unittest.TestCase):
     def test_compose_pins_catalog_image_digest(self) -> None:
         self.assertEqual(
             self.service["image"],
-            "sknnr/enshrouded-dedicated-server@sha256:269698c5ae61c4cbf01b9ea8473e84b4ff0b98c843842c60ee6a0a22fca0786e",
+            "mornedhels/enshrouded-server@sha256:689dcb30037b0c63e6929b2fe5951eaf8eca52a43792b2764440baeb012b2aa1",
         )
 
-    def test_compose_uses_fixed_container_uid_and_savegame_bind(self) -> None:
-        self.assertEqual(self.service["user"], "10000:10000")
-        binds = [v for v in self.service["volumes"] if v["target"] == "/home/steam/enshrouded/savegame"]
+    def test_runs_as_root_and_drops_to_the_data_owning_uid(self) -> None:
+        # This image's bootstrap runs groupmod/usermod and chown -R before supervisord drops
+        # privileges, so it must start as root -- a `user:` override breaks it at startup. The
+        # uid it drops to has to stay 10000:10000, which owns the existing instance data.
+        self.assertNotIn("user", self.service)
+        self.assertEqual(self.service["environment"]["PUID"], "10000")
+        self.assertEqual(self.service["environment"]["PGID"], "10000")
+
+    def test_savegame_bind_targets_the_image_save_directory(self) -> None:
+        binds = [v for v in self.service["volumes"]
+                 if v["target"] == "/opt/enshrouded/server/savegame"]
         self.assertEqual(len(binds), 1)
         self.assertEqual(binds[0]["source"], "/srv/games/enshrouded-primary/savegame")
 
@@ -44,16 +52,28 @@ class RenderEnshroudedTests(unittest.TestCase):
             self.service["ports"],
             ["100.84.161.38:15636:15636/udp", "100.84.161.38:15637:15637/udp"],
         )
-        # The connect port is the lower reserved port; STEAM_PORT is not consumed by the
-        # image, so it must not appear in the environment (Steam query stays on 27015).
-        self.assertEqual(self.service["environment"]["PORT"], "15636")
-        self.assertNotIn("STEAM_PORT", self.service["environment"])
+        # The connect port is the lower reserved port, and it reaches the game only through
+        # SERVER_QUERYPORT: this image's SERVER_PORT is deprecated and warns, and the previous
+        # image's PORT is not read at all, so neither may appear.
+        self.assertEqual(self.service["environment"]["SERVER_QUERYPORT"], "15636")
+        self.assertNotIn("SERVER_PORT", self.service["environment"])
+        self.assertNotIn("PORT", self.service["environment"])
+
+    def test_player_cap_comes_from_the_catalog_not_the_secret_file(self) -> None:
+        self.assertEqual(self.service["environment"]["SERVER_SLOT_COUNT"], "16")
+        self.assertNotIn("SERVER_SLOT_COUNT", RENDER.PROVISIONING["enshrouded"]["secret_keys"])
 
     def test_resource_limits_come_from_the_catalog(self) -> None:
         self.assertEqual(self.service["mem_limit"], "6144m")
         self.assertEqual(self.service["cpus"], 4.0)
         self.assertEqual(self.service["cap_drop"], ["ALL"])
         self.assertIn("no-new-privileges:true", self.service["security_opt"])
+
+    def test_only_the_capabilities_bootstrap_needs_are_added_back(self) -> None:
+        # Verified against the pinned image's own bootstrap: groupmod/usermod (SETGID, SETUID),
+        # chown -R of the data tree (CHOWN, FOWNER, DAC_OVERRIDE). Nothing else.
+        self.assertEqual(sorted(self.service["cap_add"]),
+                         ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"])
 
     def test_secret_is_referenced_by_env_file_not_inlined(self) -> None:
         self.assertEqual(
@@ -171,10 +191,9 @@ class ProvisioningProfileTests(unittest.TestCase):
 class EnshroudedInstallPersistenceTests(unittest.TestCase):
     """The game install must outlive the container.
 
-    The image ships no install -- its /home/steam/enshrouded is 8KB of empty directory -- and the
-    entrypoint fetches the whole server from Steam on every start. Unmounted, that lands in the
-    container's writable layer, which ExecStop's `compose down` destroys, so every restart
-    re-downloaded 8.1GB (measured 2026-10-15).
+    The image ships no install and its entrypoint fetches the whole server from Steam on every
+    start. Unmounted, that lands in the container's writable layer, which ExecStop's
+    `compose down` destroys, so every restart re-downloaded 8.1GB (measured 2026-10-15).
     """
 
     def setUp(self) -> None:
@@ -186,14 +205,14 @@ class EnshroudedInstallPersistenceTests(unittest.TestCase):
         return next((v for v in self.service["volumes"] if v["target"] == target), None)
 
     def test_the_install_directory_is_persisted(self) -> None:
-        install = self._mount("/home/steam/enshrouded")
+        install = self._mount("/opt/enshrouded/server")
         self.assertIsNotNone(install, "game install is not bind-mounted; every restart re-downloads")
         self.assertTrue(install["source"].endswith("/server"))
         self.assertFalse(install["read_only"])
 
     def test_the_savegame_stays_separately_mounted_inside_it(self) -> None:
         # Nested on purpose: the world must survive wiping the install to force a clean re-download.
-        savegame = self._mount("/home/steam/enshrouded/savegame")
+        savegame = self._mount("/opt/enshrouded/server/savegame")
         self.assertIsNotNone(savegame)
         self.assertTrue(savegame["source"].endswith("/savegame"))
 
@@ -201,16 +220,16 @@ class EnshroudedInstallPersistenceTests(unittest.TestCase):
         # Docker mounts parents first regardless, but declaration order reflects the dependency
         # and keeps the rendered file readable.
         targets = [v["target"] for v in self.service["volumes"]]
-        self.assertLess(targets.index("/home/steam/enshrouded"),
-                        targets.index("/home/steam/enshrouded/savegame"))
+        self.assertLess(targets.index("/opt/enshrouded/server"),
+                        targets.index("/opt/enshrouded/server/savegame"))
 
     def test_the_proton_prefix_is_not_mounted_over(self) -> None:
-        # The image ships compatdata/<appid> as an empty directory so Proton can create pfx.lock
-        # inside it; Proton expects Steam to have made it and does not create it itself. Mounting
-        # a host directory at compatdata hides that, and Proton dies with
-        # FileNotFoundError: .../compatdata/2278520/pfx.lock (observed 2026-10-15).
-        self.assertIsNone(self._mount("/home/steam/steamcmd/steamapps/compatdata"))
-        self.assertIsNone(self._mount("/home/steam/steamcmd"))
+        # Proton creates its prefix under the install path, inside the install mount, so it
+        # persists without a mount of its own. Giving it one is what broke the server on
+        # 2026-10-15: a bind mount at compatdata hid the directory Proton creates pfx.lock in,
+        # and Proton died with FileNotFoundError: .../compatdata/2278520/pfx.lock.
+        self.assertIsNone(self._mount("/opt/enshrouded/server/steamapps/compatdata"))
+        self.assertIsNone(self._mount("/opt/enshrouded/server/steamapps"))
 
     def test_provisioning_creates_and_owns_the_install_directory(self) -> None:
         # Without this the mount would land on a root-owned directory the container cannot write.

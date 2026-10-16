@@ -53,11 +53,22 @@ def _publish(bind_ip: str, ports: list[dict[str, Any]]) -> list[str]:
 
 
 def render_enshrouded(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
-    """Build the Compose service for sknnr/enshrouded-dedicated-server.
+    """Build the Compose service for mornedhels/enshrouded-server.
 
-    The image runs as its built-in non-root UID/GID 10000:10000 and persists only the
-    savegame directory, which the host bind mount must own. Game and query ports are
-    pinned to the catalog-reserved slot (lower = game PORT, higher = query STEAM_PORT).
+    This replaces sknnr/enshrouded-dedicated-server, which Enshrouded 1.0 broke outright and
+    which nobody can fix: it bundles GE-Proton 10-26, which cannot bridge the ``SteamUtils011``
+    interface the 1.0 build requires, and its source repository is gone (full diagnosis in
+    docs/enshrouded-1.0-outage.md). The replacement is actively maintained and shipped the fix
+    -- Ubuntu 26 base, GE-Proton 11-5, ``libvulkan1`` -- in 1.8.0 on 2026-10-16.
+
+    Like the Valheim image, this one *starts as root on purpose*: its ``bootstrap`` runs
+    ``groupmod``/``usermod``, rewrites ``/etc/passwd``, and ``chown -R``s its data tree before
+    supervisord drops to ``PUID:PGID``. A blanket ``cap_drop: [ALL]`` therefore breaks it at
+    startup, so we drop everything and add back only what that sequence needs. Read from the
+    pinned image's own scripts and verified on the host, not assumed.
+
+    One persistent path, from the image's own ``common``: ``install_path=/opt/enshrouded/server``
+    holds the Steam download, with the savegame nested inside it.
     """
     template, instance = resolved["template_id"], resolved["instance_id"]
     instance_dir = f"{INSTANCES_ROOT}/{template}-{instance}"
@@ -66,42 +77,46 @@ def render_enshrouded(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
     udp_ports = sorted(port["host"] for port in resolved["ports"] if port.get("protocol") == "udp")
     if not udp_ports:
         raise ValueError("enshrouded requires at least one reserved UDP port")
-    # Current Enshrouded uses one game port (the config's queryPort, set from PORT). The
-    # lower reserved port is the connect port players use; Steam's server-browser query is a
-    # fixed 27015 that we intentionally do not publish on the tailnet (direct-connect only).
+    # Enshrouded has one port: the config's queryPort, which is also the port players connect to.
+    # SERVER_PORT exists in this image but is deprecated and warns; SERVER_QUERYPORT is the one
+    # that reaches enshrouded_server.json. The higher reserved port stays published but unused,
+    # as it was under the previous image.
     game_port = udp_ports[0]
+    uid, gid = ENSHROUDED_UID_GID.split(":")
     return {
         "name": resolved["paths"]["compose_project"],
         "services": {
             "server": {
                 "image": f"{resolved['image']}@{resolved['image_digest']}",
                 "container_name": resolved["paths"]["compose_project"],
-                "user": _Quoted("10000:10000"),
                 "init": True,
                 # systemd owns the lifecycle; the container must not resurrect itself.
                 "restart": "no",
                 "stop_grace_period": "60s",
                 "environment": {
-                    "PORT": str(game_port),
+                    "SERVER_QUERYPORT": str(game_port),
                     "SERVER_IP": "0.0.0.0",
+                    "PUID": uid,
+                    "PGID": gid,
+                    # Catalog-driven, so the player cap lives in one place instead of in a
+                    # hand-written secret file. (The previous image's SERVER_SLOTS key is not
+                    # read by this one; a stale copy in the env file is harmless.)
+                    "SERVER_SLOT_COUNT": str(resolved["resources"]["player_capacity"]),
                 },
-                # SERVER_NAME, SERVER_SLOTS, and the secret SERVER_PASSWORD live in this
-                # root-only file written by the provisioning script -- never in the catalog.
+                # SERVER_NAME and the secret SERVER_PASSWORD live in this root-only file written
+                # by the provisioning script -- never in the catalog.
                 "env_file": [f"{instance_dir}/{template}.env"],
                 "ports": _publish(bind_ip, resolved["ports"]),
                 "volumes": [
-                    # The game install itself, which the image does NOT ship: its
-                    # /home/steam/enshrouded is 8KB of empty directory, and the entrypoint fetches
-                    # the whole server from Steam on every start. Without this mount that landed in
-                    # the container's writable layer, which ExecStop's `compose down` discards --
-                    # so every restart re-downloaded 8.1GB, and the entrypoint deletes Steam's
-                    # appmanifest beforehand so it could not even tell what was already there.
-                    # Persisted, the download happens once and later starts hash-validate local
-                    # files instead; a game release becomes a delta.
+                    # The game install, which the image does not ship: its entrypoint fetches the
+                    # whole server from Steam on every start. Unmounted that lands in the
+                    # container's writable layer, which ExecStop's `compose down` discards -- so
+                    # every restart re-downloaded 8.1GB (measured 2026-10-15). Persisted, a start
+                    # hash-validates local files instead and a game release becomes a delta.
                     {
                         "type": "bind",
                         "source": f"{data_root}/server",
-                        "target": "/home/steam/enshrouded",
+                        "target": "/opt/enshrouded/server",
                         "read_only": False,
                     },
                     # Nested inside the install path on purpose: savegame keeps its own mount so
@@ -111,11 +126,13 @@ def render_enshrouded(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
                     {
                         "type": "bind",
                         "source": f"{data_root}/savegame",
-                        "target": "/home/steam/enshrouded/savegame",
+                        "target": "/opt/enshrouded/server/savegame",
                         "read_only": False,
                     },
                 ],
                 "cap_drop": ["ALL"],
+                # Exactly what bootstrap needs to chown the data tree and drop privileges.
+                "cap_add": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
                 "security_opt": ["no-new-privileges:true"],
                 "pids_limit": 512,
                 "mem_limit": limits["mem_limit"],
@@ -220,11 +237,17 @@ ADAPTERS = {"enshrouded": render_enshrouded, "valheim": render_valheim}
 # operator is prompted for in the root-only secret env. Kept beside the adapters so adding a game
 # is one edit, not two files that can drift apart.
 VALHEIM_UID_GID = "10000:10000"
+# Passed to the Enshrouded image as PUID/PGID. The value is arbitrary to the image but not to us:
+# the existing instance data under /srv/games/enshrouded-*/ is owned by 10000:10000, which the
+# previous image hardcoded, so keeping it means the migration needs no chown of a 7.5GB tree.
+ENSHROUDED_UID_GID = "10000:10000"
 PROVISIONING = {
     "enshrouded": {
-        "uid_gid": "10000:10000",   # the image's fixed built-in UID; not configurable
+        "uid_gid": ENSHROUDED_UID_GID,  # passed to the image as PUID/PGID
         "data_dirs": ["savegame", "server"],
-        "secret_keys": ["SERVER_NAME", "SERVER_SLOTS", "SERVER_PASSWORD"],
+        # SERVER_SLOT_COUNT is deliberately absent: the player cap comes from the catalog, not
+        # from a hand-written secret file.
+        "secret_keys": ["SERVER_NAME", "SERVER_PASSWORD"],
     },
     "valheim": {
         "uid_gid": VALHEIM_UID_GID,  # arbitrary; passed to the image as PUID/PGID

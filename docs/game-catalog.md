@@ -9,9 +9,10 @@ The catalog currently defines these enabled templates, each with `primary` and `
 | Template | Image pin | Slots | UDP ports | Reservation per instance |
 | --- | --- | --- | --- | --- |
 | Valheim | `ghcr.io/community-valheim-tools/valheim-server@sha256:8e44cfce7b98d4460c3950ab85fa4ad8b82f02ab58b9bcd0b1d8a9620addd054` | 2 | 2456–2457; 2460–2461 | 2 CPU, 4096 MiB RAM, 12 GiB disk |
-| Enshrouded | `sknnr/enshrouded-dedicated-server@sha256:269698c5ae61c4cbf01b9ea8473e84b4ff0b98c843842c60ee6a0a22fca0786e` | 2 | 15636–15637; 15640–15641 | 4 CPU, 6144 MiB RAM, 30 GiB disk |
+| Enshrouded | `mornedhels/enshrouded-server@sha256:689dcb30037b0c63e6929b2fe5951eaf8eca52a43792b2764440baeb012b2aa1` | 2 | 15636–15637; 15640–15641 | 4 CPU, 6144 MiB RAM, 30 GiB disk |
 
-The image pins target Linux/amd64 manifests resolved on 2026-07-12. They are reviewable starting points, not an approval to deploy a game automatically. Instance registration allocates only a listed slot and derives all paths, project names, unit names, service accounts, and backup identities from the catalog templates via `resolve_slot_from_catalog()` in [controller/game_controller.py](../controller/game_controller.py). The root-only steps that turn a registered slot into a running service — service account, data directories, secret env, Compose file, and systemd unit — are documented in [docs/instance-provisioning.md](instance-provisioning.md).
+The image pins target Linux/amd64 manifests: Valheim resolved 2026-07-12, Enshrouded 2026-10-16
+(see [enshrouded-1.0-outage.md](enshrouded-1.0-outage.md) for why that one changed). They are reviewable starting points, not an approval to deploy a game automatically. Instance registration allocates only a listed slot and derives all paths, project names, unit names, service accounts, and backup identities from the catalog templates via `resolve_slot_from_catalog()` in [controller/game_controller.py](../controller/game_controller.py). The root-only steps that turn a registered slot into a running service — service account, data directories, secret env, Compose file, and systemd unit — are documented in [docs/instance-provisioning.md](instance-provisioning.md).
 
 ## Deploy or update the catalog
 
@@ -56,7 +57,7 @@ A future controller must reject a registration unless all of the following are t
 There are two distinct notions of "updating a game", and they are handled differently:
 
 - **Game build** (the game-server version the container downloads from Steam). Images like
-  `sknnr/enshrouded-dedicated-server` run SteamCMD (`app_update`) in their entrypoint on **every
+  `mornedhels/enshrouded-server` run SteamCMD (`app_update`) in their entrypoint on **every
   container start**, so a **Restart** already pulls and applies the latest build — no separate
   "force update" action is needed, and the friend-facing UI's Restart button says so. New game
   adapters should prefer images that update-on-start (or otherwise ensure a restart refreshes the
