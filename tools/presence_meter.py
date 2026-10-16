@@ -580,6 +580,31 @@ def has_occupancy_reader(template_id: str) -> bool:
     return template_id in OCCUPANCY_READERS
 
 
+def attributed_names(identities: dict[str, dict[str, Any]], game_ids: list[str] | None,
+                     excluded: frozenset[str] = frozenset()) -> list[str]:
+    """Billing names for the game IDs the game reports connected, minus this game's exclusions.
+
+    One definition, used by both the meter and the read-only observer. They each had their own copy
+    and the copies drifted: when an identity entry grew from a bare login string into
+    ``{"name", "login", "characters"}``, the observer kept building a set of the entries themselves
+    and crashed with ``TypeError: cannot use 'dict' as a set element`` -- but only while a mapped
+    player was connected, so it died exactly when it was needed and looked healthy the rest of the
+    time (2026-09-30 to 2026-10-16, found via its journal).
+
+    An unmapped ID yields no name, so the shortfall against the game's own count reaches the bill as
+    UNATTRIBUTED rather than being guessed at. Exclusions are matched against the login as well as
+    the in-game name: the dashboard's Exclusions page validates entries as tailnet logins (they must
+    contain an "@"), so a name-only comparison would never match anything an administrator can
+    actually enter there.
+    """
+    return sorted({
+        identities[game_id]["name"] for game_id in (game_ids or [])
+        if game_id in identities
+        and identities[game_id]["name"] not in excluded
+        and (not identities[game_id]["login"] or identities[game_id]["login"] not in excluded)
+    })
+
+
 def load_exclusions(exclusions_path: Path) -> dict[str, frozenset[str]]:
     """Load the admin-managed per-game exclusion map: {template_id: frozenset(logins)}.
 
@@ -662,16 +687,7 @@ def run_cycle_tailscale(catalog: dict[str, Any], ledger_path: Path, tailscale_bi
                         connected = instance_connected_players(
                             template_id, f"game-{key}", docker_bin, identity_window,
                             character_index(identities, template_id))
-                        # Match exclusions against the login as well as the in-game name: the
-                        # dashboard's Exclusions page validates entries as tailnet logins (they must
-                        # contain an "@"), so a name-only comparison would never match anything an
-                        # administrator can actually enter there.
-                        present = sorted({
-                            identities[pid]["name"] for pid in (connected or [])
-                            if pid in identities
-                            and identities[pid]["name"] not in excluded
-                            and (not identities[pid]["login"] or identities[pid]["login"] not in excluded)
-                        })
+                        present = attributed_names(identities, connected, excluded)
                     elif attribution == "byte-rate":
                         ranked_for_instance = [pair for pair in ranked if pair[1] not in excluded]
                         present = attribute_by_count(ranked_for_instance, count, floor_kbps)
