@@ -93,7 +93,15 @@ deleted — and Enshrouded 1.0 does not run under the GE-Proton it bundles at al
 - **It starts as root on purpose.** The bootstrap runs `groupmod`/`usermod`, rewrites
   `/etc/passwd`, and `chown -R`s its data tree before supervisord drops to `PUID:PGID`. A blanket
   `cap_drop: [ALL]` breaks it at startup, so the adapter drops everything and adds back exactly
-  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`. A `user:` override would also break it.
+  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`, plus `KILL`. A `user:` override would also
+  break it.
+- **`KILL` is for stopping, not starting.** supervisord stays root while the game runs as
+  `PUID:PGID`, and signalling across that uid boundary needs `CAP_KILL`. Without it the server
+  starts normally and can never be stopped: `supervisorctl stop` fails with `EPERM`, the program
+  parks in `UNKNOWN`, the image's updater cannot restart onto a build it just installed, and
+  `docker compose down` degrades to Docker SIGKILLing the container — an unclean world save every
+  time. Shipped missing on 2026-10-16 and fixed on 2026-10-21; a capability set verified only
+  against startup will reproduce it. See [game-build-updates.md](game-build-updates.md).
   `PUID:PGID` is `10000:10000` — arbitrary to the image, but it owns the existing 7.5GB data tree,
   so keeping it means the migration needed no chown.
 
@@ -149,7 +157,9 @@ deleted — and Enshrouded 1.0 does not run under the GE-Proton it bundles at al
 - **It starts as root on purpose.** The bootstrap runs `groupmod`, rewrites `/etc/passwd`, and
   `chown -R`s the data tree before supervisord drops to `PUID:PGID`. A blanket `cap_drop: [ALL]`
   as used for Enshrouded kills it at startup, so the adapter drops everything and adds back only
-  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID` — taken from that script, not assumed.
+  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID` — taken from that script, not assumed —
+  plus `KILL`, which the stop path needs for the same reason Enshrouded does (see above). Valheim
+  carried that gap silently for three weeks; Enshrouded is what surfaced it.
   `no-new-privileges` still applies, ports are still tailnet-only, and caps are still a deny-list
   of one.
 - **`CROSSPLAY=true`, joined by code.** This is forced by the deployment rather than chosen.

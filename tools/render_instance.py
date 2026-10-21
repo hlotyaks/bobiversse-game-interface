@@ -131,8 +131,15 @@ def render_enshrouded(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
                     },
                 ],
                 "cap_drop": ["ALL"],
-                # Exactly what bootstrap needs to chown the data tree and drop privileges.
-                "cap_add": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
+                # What bootstrap needs to chown the data tree and drop privileges, plus KILL.
+                # KILL is not optional: supervisord stays root while the game runs as PUID:PGID,
+                # and signalling across that uid boundary is exactly what CAP_KILL governs.
+                # Without it every supervisorctl stop/restart dies with EPERM, the program parks
+                # in UNKNOWN state, and shutdown degrades to Docker SIGKILLing the container --
+                # an unclean world save on every stop. Found live on 2026-10-21; the capability
+                # set was chosen by checking what *startup* needed and never what stop needed.
+                # See docs/game-build-updates.md.
+                "cap_add": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "KILL", "SETGID", "SETUID"],
                 "security_opt": ["no-new-privileges:true"],
                 "pids_limit": 512,
                 "mem_limit": limits["mem_limit"],
@@ -217,8 +224,15 @@ def render_valheim(resolved: dict[str, Any], bind_ip: str) -> dict[str, Any]:
                      "target": "/opt/valheim", "read_only": False},
                 ],
                 "cap_drop": ["ALL"],
-                # Exactly what bootstrap needs to chown the data tree and drop privileges.
-                "cap_add": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"],
+                # What bootstrap needs to chown the data tree and drop privileges, plus KILL.
+                # KILL is not optional: supervisord stays root while the game runs as PUID:PGID,
+                # and signalling across that uid boundary is exactly what CAP_KILL governs.
+                # Without it every supervisorctl stop/restart dies with EPERM, the program parks
+                # in UNKNOWN state, and shutdown degrades to Docker SIGKILLing the container --
+                # an unclean world save on every stop. Found live on 2026-10-21; the capability
+                # set was chosen by checking what *startup* needed and never what stop needed.
+                # See docs/game-build-updates.md.
+                "cap_add": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "KILL", "SETGID", "SETUID"],
                 "security_opt": ["no-new-privileges:true"],
                 "pids_limit": 512,
                 "mem_limit": limits["mem_limit"],

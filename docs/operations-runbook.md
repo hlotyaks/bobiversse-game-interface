@@ -62,6 +62,25 @@ code, so the unit records `Result=success` and `Restart=on-failure` never fires.
 failed game start usually does not stop the container at all (see above), so the unit looks healthy
 either way. Judge a start by the container log, not by the unit's result.
 
+**A server that is up but reports "needs updating" to players is a different fault.** The server
+logs `HostOnline` and looks entirely healthy; it is simply serving an old build that updated
+clients refuse to join. Compare the installed build with Steam's rather than reading the log:
+
+    docker exec game-enshrouded-primary grep -m1 buildid \
+      /opt/enshrouded/server/steamapps/appmanifest_2278520.acf
+    curl -s https://api.steamcmd.net/v1/info/2278520 \
+      | jq -r '.data."2278520".depots.branches.public.buildid'
+
+If they differ, the start's update attempt hit a steamcmd race and installed nothing while exiting
+0 — `Success! App '2278520' already up to date.` in the log with a newer build available is the
+signature. Restarting retries the same coin flip, so it fixes it only sometimes. Force it:
+
+    docker exec game-enshrouded-primary /usr/local/etc/enshrouded/enshrouded-force-update
+
+Check nobody is connected first: the image's own player check cannot protect them on this build.
+Full diagnosis, including why this is not the image's version check, in
+[game-build-updates.md](game-build-updates.md).
+
 ## Backup and recovery
 
 Scheduled backups run daily at 02:00 local time with up to 15 minutes of random delay. They invoke the existing root-owned `backup-game-data <template>-<instance>` and `verify-game-backup <template>-<instance>` commands. The scheduler stores only timestamp, verification result, and a bounded error summary in `/var/lib/game-server-interface/backup_status.json`; it never stores game secrets.
