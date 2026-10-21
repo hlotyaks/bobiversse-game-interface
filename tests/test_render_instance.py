@@ -69,11 +69,12 @@ class RenderEnshroudedTests(unittest.TestCase):
         self.assertEqual(self.service["cap_drop"], ["ALL"])
         self.assertIn("no-new-privileges:true", self.service["security_opt"])
 
-    def test_only_the_capabilities_bootstrap_needs_are_added_back(self) -> None:
+    def test_only_the_capabilities_bootstrap_and_shutdown_need_are_added_back(self) -> None:
         # Verified against the pinned image's own bootstrap: groupmod/usermod (SETGID, SETUID),
-        # chown -R of the data tree (CHOWN, FOWNER, DAC_OVERRIDE). Nothing else.
+        # chown -R of the data tree (CHOWN, FOWNER, DAC_OVERRIDE). KILL is for stopping, not
+        # starting -- see the regression test below. Nothing else.
         self.assertEqual(sorted(self.service["cap_add"]),
-                         ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"])
+                         ["CHOWN", "DAC_OVERRIDE", "FOWNER", "KILL", "SETGID", "SETUID"])
 
     def test_secret_is_referenced_by_env_file_not_inlined(self) -> None:
         self.assertEqual(
@@ -122,7 +123,8 @@ class ValheimAdapterTests(unittest.TestCase):
     def test_drops_all_capabilities_then_adds_back_only_what_bootstrap_needs(self) -> None:
         service = self._service()
         self.assertEqual(service["cap_drop"], ["ALL"])
-        self.assertEqual(sorted(service["cap_add"]), ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"])
+        self.assertEqual(sorted(service["cap_add"]),
+                         ["CHOWN", "DAC_OVERRIDE", "FOWNER", "KILL", "SETGID", "SETUID"])
         self.assertIn("no-new-privileges:true", service["security_opt"])
 
     def test_joins_by_code_over_a_relay_not_by_address_or_browser(self) -> None:
@@ -238,3 +240,49 @@ class EnshroudedInstallPersistenceTests(unittest.TestCase):
             self.assertIn(required, profile["data_dirs"])
         self.assertNotIn("compatdata", profile["data_dirs"])
         self.assertEqual(profile["uid_gid"], "10000:10000")
+
+
+class SignalCapabilityTests(unittest.TestCase):
+    """Both images keep supervisord as root and run the game as an unprivileged uid.
+
+    Signalling across that uid boundary is governed by CAP_KILL, so a capability set chosen by
+    asking only "what does startup need?" produces a server that starts fine and can never be
+    stopped. That is what shipped on 2026-10-21: `supervisorctl stop` failed with
+
+        CRIT unknown problem killing enshrouded-server (144):
+        PermissionError: [Errno 1] Operation not permitted
+
+    which left the program in UNKNOWN state, so the updater's stop -> update -> start sequence
+    installed a new build and then could not restart onto it, and `docker compose down` degraded
+    to a SIGKILL of the container instead of a clean world save. Enshrouded surfaced it; Valheim
+    had the same hole silently. Keep both templates in one test so neither drifts.
+    """
+
+    TEMPLATES = ("enshrouded", "valheim")
+
+    def _cap_add(self, template):
+        rendered = RENDER.render(CATALOG, template, "primary", "100.84.161.38")
+        return yaml.safe_load(rendered["compose.yaml"])["services"]["server"]["cap_add"]
+
+    def test_supervisord_can_signal_the_game_process_it_owns(self) -> None:
+        for template in self.TEMPLATES:
+            with self.subTest(template=template):
+                self.assertIn("KILL", self._cap_add(template))
+
+    def test_the_privilege_drop_capabilities_are_still_present(self) -> None:
+        # KILL is an addition, not a replacement: bootstrap still has to chown the data tree and
+        # drop to PUID:PGID before the game starts.
+        for template in self.TEMPLATES:
+            with self.subTest(template=template):
+                cap_add = self._cap_add(template)
+                for required in ("CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"):
+                    self.assertIn(required, cap_add)
+
+    def test_nothing_broader_than_kill_was_added(self) -> None:
+        # CAP_KILL only reaches processes in the container's own PID namespace. The temptation
+        # when a stop fails with EPERM is SYS_ADMIN or privileged: true -- neither belongs here.
+        for template in self.TEMPLATES:
+            with self.subTest(template=template):
+                cap_add = self._cap_add(template)
+                for forbidden in ("SYS_ADMIN", "SYS_PTRACE", "SYS_RESOURCE", "ALL"):
+                    self.assertNotIn(forbidden, cap_add)
