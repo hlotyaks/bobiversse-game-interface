@@ -297,9 +297,22 @@ not express that. Games that saw no play in the month are left out.
 
 Two things gate whether a new game bills correctly, and neither fails loudly:
 
-1. **A rate in `billing.yaml`.** A slot with no `run_cost_per_hour` accrues playtime and bills
-   **zero** — a working-looking bill that happens to be free. The combined report prints a WARNING
-   naming any such game, and a test asserts every catalog slot is priced.
+1. **A rate in `billing.yaml`.** A new slot inherits `defaults.run_cost_per_hour`, which is the
+   starting template for every game and is set to the same nominal figure the existing games
+   charge. An inherited rate is labelled on the report (`inherited the billing.yaml default rate`)
+   so a game is never quietly costed by an assumption nobody made deliberately; give it its own
+   `instances.<slot>` entry when it should differ. Only a config with **neither** an entry nor a
+   `defaults` block bills **zero**, and that prints a WARNING naming the game. A test asserts every
+   catalog slot is priced in the shipped config.
+
+   That test is not sufficient on its own, and the gap is worth understanding. It validates the
+   config **in the repo**; `install-usage-metering.sh` deliberately does not overwrite an existing
+   `/etc/game-server-interface/billing.yaml`, because the live copy may hold rates an admin tuned.
+   So the repo can be correct while the host is a release behind — which is exactly how
+   `valheim-primary` accrued a month of playtime and billed nothing: the rate was committed,
+   the host never received it, and the only symptom was a free game on a bill nobody read closely.
+   The installer now reports which shipped settings the live copy lacks, every run, instead of
+   printing `keeping existing` and moving on. After changing rates in the repo, read that output.
 2. **An occupancy reader and an identity reader** keyed by template in
    [tools/presence_meter.py](../tools/presence_meter.py) (`OCCUPANCY_READERS`, `IDENTITY_READERS`).
    Without them the meter falls back to the `--min-kbps` tailnet heuristic, which on this host

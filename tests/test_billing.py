@@ -323,3 +323,78 @@ class CombinedBillingTests(unittest.TestCase):
                  for template, body in (catalog.get("templates") or {}).items()
                  for slot in ((body.get("instance_policy") or {}).get("slots") or {})}
         self.assertEqual(slots - priced, set(), "catalog slot(s) with no run_cost_per_hour")
+
+
+class RateResolutionTests(unittest.TestCase):
+    """A game slot must never cost zero per hour just because nobody wrote a rate for it.
+
+    `valheim-primary` did exactly that: the rate was added to the repo's `billing.yaml`, but
+    `install-usage-metering.sh` deliberately does not overwrite an existing `/etc` copy, so the
+    host never received it. The slot accrued a month of real playtime and billed nothing, and the
+    bill still looked like a working bill — just a free one. `defaults` makes that unreachable for
+    any future game, and the resolved source is reported so an inherited rate is visible rather
+    than assumed.
+    """
+
+    DEFAULTS_ONLY = {"defaults": {"run_cost_per_hour": 0.18}}
+
+    def test_an_explicit_instance_rate_wins_over_the_default(self) -> None:
+        config = {"defaults": {"run_cost_per_hour": 0.18},
+                  "instances": {"enshrouded-primary": {"run_cost_per_hour": 0.25}}}
+        self.assertEqual(BILLING.resolve_rate(config, "enshrouded-primary"), (0.25, "instance"))
+
+    def test_a_game_nobody_priced_inherits_the_default(self) -> None:
+        # The case that matters: a game added later, or one whose entry never reached the host.
+        self.assertEqual(BILLING.resolve_rate(self.DEFAULTS_ONLY, "newgame-primary"), (0.18, "default"))
+
+    def test_with_neither_a_rate_nor_a_default_the_absence_is_reported_not_defaulted(self) -> None:
+        rate, source = BILLING.resolve_rate({"instances": {}}, "valheim-primary")
+        self.assertEqual(rate, 0.0)
+        self.assertIsNone(source)
+
+    def test_a_malformed_instances_block_does_not_crash_the_bill(self) -> None:
+        for broken in ({"instances": None}, {"instances": []}, {"instances": {"v-p": "0.18"}}, {}):
+            with self.subTest(config=broken):
+                rate, source = BILLING.resolve_rate(broken, "v-p")
+                self.assertEqual((rate, source), (0.0, None))
+
+    def test_an_explicit_zero_is_honoured_as_a_deliberate_choice(self) -> None:
+        # Free on purpose is legitimate; it must not fall through to the default.
+        config = {"defaults": {"run_cost_per_hour": 0.18},
+                  "instances": {"freebie-primary": {"run_cost_per_hour": 0}}}
+        self.assertEqual(BILLING.resolve_rate(config, "freebie-primary"), (0.0, "instance"))
+
+
+class ShippedBillingConfigTests(unittest.TestCase):
+    """Guard the shape of the config that ships, alongside the existing per-slot pricing guard.
+
+    `test_every_catalog_slot_has_a_rate_in_the_shipped_config` above already asserts every catalog
+    slot is priced -- and it passed throughout the Valheim incident, because the *repo* config was
+    correct the whole time and the stale copy was the one on the host. A unit test cannot see that
+    drift; `install-usage-metering.sh` reports it at deploy time instead. What is checkable here is
+    that the shipped config still gives a new game somewhere to inherit a rate from.
+    """
+
+    def setUp(self) -> None:
+        import yaml
+        self.config = yaml.safe_load(
+            (REPO_ROOT / "deploy/etc/game-server-interface/billing.yaml").read_text(encoding="utf-8"))
+
+    def test_the_config_carries_a_default_rate_for_new_games(self) -> None:
+        rate, source = BILLING.resolve_rate(self.config, "a-game-added-tomorrow")
+        self.assertEqual(source, "default")
+        self.assertGreater(rate, 0.0)
+
+    def test_valheim_is_priced_the_same_as_enshrouded(self) -> None:
+        # Asked for explicitly: one shared nominal figure, since the rate on this host is notional
+        # and a per-game split would imply precision we do not have.
+        enshrouded, _ = BILLING.resolve_rate(self.config, "enshrouded-primary")
+        for slot in ("valheim-primary", "valheim-secondary"):
+            with self.subTest(instance=slot):
+                self.assertEqual(BILLING.resolve_rate(self.config, slot), (enshrouded, "instance"))
+
+    def test_the_default_matches_what_the_existing_games_charge(self) -> None:
+        # The starting template for a new game should be what the current games cost, not a
+        # number that silently undercuts them.
+        enshrouded, _ = BILLING.resolve_rate(self.config, "enshrouded-primary")
+        self.assertEqual(self.config["defaults"]["run_cost_per_hour"], enshrouded)
