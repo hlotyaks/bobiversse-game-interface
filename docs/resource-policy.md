@@ -21,7 +21,28 @@ Concurrent instances are permitted only when all conditions are satisfied:
 4. Every configured disk path retains the configured free-space safety reserve after the projected disk reservation.
 5. The host has the minimum free swap capacity.
 
-The present reservations mean that one Enshrouded instance plus up to two Valheim instances fits the six-core CPU budget, subject to actual disk and swap checks. Two Enshrouded instances plus two Valheim instances do not fit and are rejected before any `systemd` start request.
+**Enshrouded and Valheim can no longer run at the same time.** Enshrouded's reservation was raised from four cores to six on 2026-10-31 (see below), which consumes the entire six-core admission budget on its own. Starting either game while the other is active is refused before any `systemd` start request, with the reason `CPU reservation 8 exceeds 6 core admission limit` and the running instance named so it is obvious what has to be stopped first. Two Enshrouded instances, or two Valheim instances alongside Enshrouded, are likewise rejected. This is a deliberate trade: a playable Enshrouded in exchange for taking turns between games. Raising the admission limit above six would hand the games the cores the host itself needs for Docker, Tailscale, the controller, backups and metering.
+
+## Why Enshrouded reserves six cores
+
+Four cores produced the same failure that two cores had produced in July, and the symptom was not "the server is at 100% CPU" — it was that the server stalled in bursts. Measured on 2026-10-31 with three players connected and roughly 25,000 world entities:
+
+| Measure | Value |
+| --- | ---: |
+| CPU used vs. quota | 392% of 400% |
+| Scheduling periods throttled | 34,532 of 36,781 (93.9%) |
+| Accumulated stall | ~81 minutes |
+| Simulation tick | 27–38 ms average, 18–22 updates/s |
+| Memory used | 1.08 GiB of 6 GiB |
+
+Memory was never the constraint. The game runs eight compute threads — one `keen GameServer` plus seven `keen Task-Default` workers — and sizes that pool to the host's eight CPUs, not to the container's quota. A pool that wide against a four-core quota spends each 100 ms period's budget early and then freezes for the remainder, so the cost is paid in latency rather than in throughput. That is why restarting never helped and why the server looked healthy: `HostOnline`, sensible memory, no errors in the log.
+
+Demand was at least 4.3 cores *while throttled*, so six clears it with headroom. Read the throttle counters rather than CPU percentage when judging this:
+
+    cid=$(docker inspect -f '{{.Id}}' game-enshrouded-primary)
+    cat /sys/fs/cgroup/system.slice/docker-$cid.scope/cpu.stat
+
+`nr_throttled` approaching `nr_periods` is the signal. If it returns there with six cores, the next lever is the world's entity count, not the quota — the catalog cannot buy its way out of a base that is too expensive to simulate.
 
 ## Enforced limits during provisioning
 

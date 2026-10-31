@@ -299,3 +299,63 @@ class JoinCodeTests(unittest.TestCase):
 
     def test_an_unreadable_log_yields_no_code_rather_than_an_error(self) -> None:
         self.assertIsNone(self._code("valheim", "", returncode=1))
+
+
+class MutualExclusionTests(unittest.TestCase):
+    """Enshrouded's 6-core reservation consumes the entire 6-core admission budget.
+
+    It was raised from 4 to 6 on 2026-10-31 to stop the CPU quota throttling that was ruining
+    tick times (docs/resource-policy.md). The price is that Enshrouded and Valheim became
+    mutually exclusive — and that is only acceptable while it is *stated*, loudly, at the moment
+    someone tries. So assert the refusal and the operator-facing reason in both directions
+    rather than trusting the catalog arithmetic to stay correct by itself.
+    """
+
+    ACTIVE = "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nNRestarts=0\n"
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.catalog = root / "catalog.yaml"
+        shutil.copy(Path(__file__).parents[1] / "deploy/etc/game-server-interface/catalog.yaml", self.catalog)
+        self.controller = MODULE.Controller(self.catalog, root / "state/instances.json", root / "log/audit.jsonl")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _admission_with_running(self, running, candidate):
+        self.controller.register_instance(*running)
+        self.controller._systemctl = lambda *args: subprocess.CompletedProcess(args, 0, self.ACTIVE, "")
+        return self.controller.admission(self.controller.resolve_slot(*candidate))
+
+    def test_a_running_enshrouded_refuses_a_valheim_start(self) -> None:
+        admission = self._admission_with_running(("enshrouded", "primary"), ("valheim", "primary"))
+        self.assertFalse(admission["allowed"])
+        self.assertEqual(admission["projected_reservation"]["cpu_cores"], 8.0)
+        self.assertTrue(
+            any("CPU reservation 8 exceeds 6 core admission limit" in reason for reason in admission["reasons"]),
+            admission["reasons"],
+        )
+
+    def test_a_running_valheim_refuses_an_enshrouded_start(self) -> None:
+        # The same wall from the other side: whichever game is up, the other cannot be admitted.
+        admission = self._admission_with_running(("valheim", "primary"), ("enshrouded", "primary"))
+        self.assertFalse(admission["allowed"])
+        self.assertEqual(admission["projected_reservation"]["cpu_cores"], 8.0)
+        self.assertTrue(
+            any("CPU reservation 8 exceeds 6 core admission limit" in reason for reason in admission["reasons"]),
+            admission["reasons"],
+        )
+
+    def test_the_refusal_names_the_running_instance_so_the_operator_knows_what_to_stop(self) -> None:
+        admission = self._admission_with_running(("enshrouded", "primary"), ("valheim", "primary"))
+        self.assertEqual(
+            [(item["template_id"], item["instance_id"]) for item in admission["running_instances"]],
+            [("enshrouded", "primary")],
+        )
+
+    def test_either_game_alone_still_fits(self) -> None:
+        for template in ("enshrouded", "valheim"):
+            with self.subTest(template=template):
+                admission = self.controller.admission(self.controller.resolve_slot(template, "primary"))
+                self.assertTrue(admission["allowed"], admission["reasons"])

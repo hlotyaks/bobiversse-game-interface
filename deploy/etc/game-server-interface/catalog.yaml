@@ -118,8 +118,15 @@ templates:
       timeout_seconds: 1200
     resources:
       # Enshrouded is CPU-bound during group combat; 2 cores throttled hard (see 2026-07-18
-      # diagnosis). Raised to 4 (still <= the 6-core admission limit).
-      cpu_cores: 4
+      # diagnosis). Raised to 4, then to 6 on 2026-10-31 after the same failure recurred: with 3
+      # players and ~25k world entities the container sat at 392% of its 400% quota and 34,532 of
+      # 36,781 scheduling periods were throttled (94%), 81 minutes of accumulated stall. The game
+      # runs 8 compute threads -- one `keen GameServer` plus 7 `keen Task-Default` workers, sized
+      # to the host's 8 CPUs, not to the quota -- so the pool spent each 100ms period's budget
+      # early and then froze, which costs far more latency than simply having fewer cores.
+      # Measured demand was >=4.3 cores while throttled, so 6 clears it with headroom.
+      # 6 consumes the entire 6-core admission budget: no second game can run concurrently.
+      cpu_cores: 6
       memory_mib: 6144
       disk_gib: 30
       player_capacity: 16

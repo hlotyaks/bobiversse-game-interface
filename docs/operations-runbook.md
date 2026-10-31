@@ -81,6 +81,34 @@ Check nobody is connected first: the image's own player check cannot protect the
 Full diagnosis, including why this is not the image's version check, in
 [game-build-updates.md](game-build-updates.md).
 
+## A server that is up but plays badly
+
+Check throttling before anything else, and do not trust CPU percentage — a container pinned at its
+quota looks the same as one comfortably busy:
+
+    cid=$(docker inspect -f '{{.Id}}' game-enshrouded-primary)
+    cat /sys/fs/cgroup/system.slice/docker-$cid.scope/cpu.stat
+
+`nr_throttled` close to `nr_periods` means the container is being frozen at the end of most 100 ms
+periods. That stalls the simulation in bursts, which players feel as rubber-banding and delayed
+hits even though the log shows `HostOnline` and memory looks fine. On 2026-10-31 Enshrouded was at
+93.9% throttled with 1.08 GiB of 6 GiB memory used — restarting it changed nothing, because nothing
+was wrong with the process.
+
+The game's own tick stats say whether the simulation is keeping up:
+
+    docker logs --since 10m game-enshrouded-primary 2>&1 | grep "ecss. Stats"
+
+`Avg:` above roughly 30 ms, with `Upd:` well under 1,800 per 60 s window, is a server running the
+world slower than real time. Read the player count from the `Machines:` block and count the `m#N`
+lines — `m#0` is the **server's own** entry, so three connected players show as `m#0` through `m#3`.
+Grepping for `m#0` alone will tell you the server is empty when it is not.
+
+Enshrouded reserves six of the host's eight cores, so **it and Valheim cannot run at the same
+time**. A start attempt for the other game is refused with `CPU reservation 8 exceeds 6 core
+admission limit` and names the instance to stop first. Background and measurements in
+[resource-policy.md](resource-policy.md).
+
 ## Backup and recovery
 
 Scheduled backups run daily at 02:00 local time with up to 15 minutes of random delay. They invoke the existing root-owned `backup-game-data <template>-<instance>` and `verify-game-backup <template>-<instance>` commands. The scheduler stores only timestamp, verification result, and a bounded error summary in `/var/lib/game-server-interface/backup_status.json`; it never stores game secrets.
