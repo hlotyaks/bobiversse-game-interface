@@ -31,6 +31,36 @@ if [[ ! -e /etc/game-server-interface/billing.yaml ]]; then
   install -o root -g root -m 0644 "${repo_root}/deploy/etc/game-server-interface/billing.yaml" /etc/game-server-interface/billing.yaml
 else
   echo "keeping existing /etc/game-server-interface/billing.yaml"
+  # Not overwriting is deliberate -- the live copy may hold rates an admin tuned. But silence here
+  # is how valheim-primary billed as free for a month: the repo gained its rate, the host never did,
+  # and nothing said so until someone read a bill. Report what the live copy is missing, loudly,
+  # without touching it. Never fail the install over this -- a drift report must not block a deploy.
+  python3 - "${repo_root}/deploy/etc/game-server-interface/billing.yaml" \
+           /etc/game-server-interface/billing.yaml <<'DRIFT' || true
+import sys, yaml
+try:
+    shipped = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+    live = yaml.safe_load(open(sys.argv[2], encoding="utf-8")) or {}
+except Exception as exc:                                  # unreadable or invalid: say so, carry on
+    print(f"  WARNING: could not compare billing.yaml against the shipped copy: {exc}")
+    sys.exit(0)
+missing_top = [k for k in shipped if k not in live]
+shipped_instances = shipped.get("instances") or {}
+live_instances = live.get("instances") or {}
+missing_instances = [k for k in shipped_instances if k not in live_instances]
+if missing_top or missing_instances:
+    print("  WARNING: /etc/game-server-interface/billing.yaml is missing settings this release ships:")
+    for key in missing_top:
+        print(f"    - {key}")
+    for key in missing_instances:
+        rate = (shipped_instances.get(key) or {}).get("run_cost_per_hour")
+        print(f"    - instances.{key} (run_cost_per_hour: {rate})")
+    print("  Merge them by hand, or move the live file aside and re-run this installer to reinstall it.")
+    if "defaults" in missing_top:
+        print("  NOTE: without `defaults`, a game slot with no rate of its own bills as zero.")
+else:
+    print("  (live billing.yaml carries every setting this release ships)")
+DRIFT
 fi
 
 # Per-game presence exclusions. Seed the initial map (Enshrouded excludes the non-playing admin) but

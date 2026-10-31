@@ -9,13 +9,23 @@ currency: USD
 # there is no real cloud charge, so this is a nominal rate only used to test-fly the model and
 # see how the numbers feel. Replace with the real elastic hourly rate when/if moving to cloud
 # (see docs/cloud-hosting-cost-analysis.md).
+# The starting template for any game slot without an explicit entry below. Every new game
+# inherits this, so adding one can never produce a slot that accrues playtime and bills zero --
+# which is exactly what happened to valheim-primary: it was added to this file in the repo but the
+# installer does not overwrite an existing /etc copy, so the host never saw the rate and a month of
+# Valheim playtime billed as free. An inherited rate is labelled "(default rate)" on the report, so
+# a game is never quietly costed by an assumption nobody made deliberately.
+defaults:
+  run_cost_per_hour: 0.18
+
 instances:
   enshrouded-primary:
     run_cost_per_hour: 0.18
   enshrouded-secondary:
     run_cost_per_hour: 0.18
-  # Every game slot that can run needs a rate here. A slot with no entry accrues playtime and
-  # bills zero, which looks like a working bill that happens to be free.
+  # Valheim is costed identically to Enshrouded, deliberately: the rate is nominal on this host
+  # (no real cloud charge), so a single shared figure keeps the model honest rather than implying
+  # a precision we do not have. Revisit per game if the host ever bills by instance size.
   valheim-primary:
     run_cost_per_hour: 0.18
   valheim-secondary:

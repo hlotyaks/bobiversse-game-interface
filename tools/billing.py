@@ -269,8 +269,11 @@ def render_text(report: dict[str, Any], instance: str) -> str:
         )
     totals = report["totals"]
     if not report.get("rate_configured", True):
-        lines.append(f"  WARNING: no run_cost_per_hour for {instance} in billing.yaml -- "
-                     f"playtime is recorded but bills as zero")
+        lines.append(f"  WARNING: no run_cost_per_hour for {instance} in billing.yaml, and no "
+                     f"defaults entry to inherit -- playtime is recorded but bills as zero")
+    elif report.get("rate_source") == "default":
+        lines.append(f"  note: {instance} has no rate of its own and inherited the billing.yaml "
+                     f"default ({report['currency']} {report['run_cost_per_hour']:.2f}/h)")
     lines += [
         f"  {'-' * 69}",
         f"  actual cost: {currency} {totals['actual_cost']:.2f}   "
@@ -294,6 +297,28 @@ def render_text(report: dict[str, Any], instance: str) -> str:
     return "\n".join(lines)
 
 
+def resolve_rate(config: dict[str, Any], instance: str) -> tuple[float, str | None]:
+    """Resolve an instance's hourly run cost: explicit entry, then ``defaults``, then nothing.
+
+    The third case used to be a silent ``0.0``. That is how ``valheim-primary`` accrued a month of
+    real playtime and billed nothing (found 2026-10-31): the rate existed in the repo's
+    ``billing.yaml`` but ``install-usage-metering.sh`` does not overwrite an existing ``/etc`` copy,
+    so the host never received it. A cost-sharing tool that is quietly free is a worse failure than
+    one that is loudly wrong, so an unresolvable rate is reported rather than defaulted to free.
+
+    Returns the rate and where it came from -- ``"instance"``, ``"default"`` or ``None`` -- so the
+    report can distinguish a rate someone chose for this game from one it inherited.
+    """
+    instances = config.get("instances")
+    entry = instances.get(instance) if isinstance(instances, dict) else None
+    if isinstance(entry, dict) and entry.get("run_cost_per_hour") is not None:
+        return float(entry["run_cost_per_hour"]), "instance"
+    defaults = config.get("defaults")
+    if isinstance(defaults, dict) and defaults.get("run_cost_per_hour") is not None:
+        return float(defaults["run_cost_per_hour"]), "default"
+    return 0.0, None
+
+
 def build_report(ledger_path: Path, config: dict[str, Any], instance: str, month: str | None = None) -> dict[str, Any]:
     """Build the report for one instance, scoped to a ``YYYY-MM`` month (default: current).
 
@@ -305,10 +330,7 @@ def build_report(ledger_path: Path, config: dict[str, Any], instance: str, month
     months = sorted(set(available_months(all_samples)) | {current_month()})
     selected = month if month else current_month()
     samples = filter_by_month(all_samples, selected)
-    instances = config.get("instances", {})
-    configured = isinstance(instances, dict) and instance in instances
-    instance_cfg = instances.get(instance, {}) if isinstance(instances, dict) else {}
-    rate = float(instance_cfg.get("run_cost_per_hour", 0.0))
+    rate, rate_source = resolve_rate(config, instance)
     report = compute_report(
         samples,
         rate_per_hour=rate,
@@ -319,10 +341,12 @@ def build_report(ledger_path: Path, config: dict[str, Any], instance: str, month
     )
     report["currency"] = config.get("currency", "USD")
     report["instance"] = instance
-    # A game with no entry in billing.yaml costs zero per hour, so it bills nothing while still
-    # accruing real playtime. Silently free is the wrong failure for a cost-sharing tool -- adding a
-    # game must not quietly stop charging for it -- so say so on the report.
-    report["rate_configured"] = configured
+    # A game with no rate at all costs zero per hour, so it bills nothing while still accruing
+    # real playtime. Silently free is the wrong failure for a cost-sharing tool -- adding a game
+    # must not quietly stop charging for it -- so say so on the report. `defaults` normally
+    # prevents this; reaching here means even that is missing from the config.
+    report["rate_configured"] = rate_source is not None
+    report["rate_source"] = rate_source
     report["month"] = selected
     report["available_months"] = months
     return report
@@ -427,10 +451,15 @@ def render_combined_text(report: dict[str, Any]) -> str:
     if totals["unattributed_player_hours"]:
         lines.append(f"  UNATTRIBUTED: {_hours(totals['unattributed_player_hours'])} across all games "
                      f"({currency} {totals['unbilled']:.2f} unbilled)")
+    inherited = sorted(game for game, sub in report["instances"].items()
+                       if sub.get("rate_source") == "default")
+    if inherited:
+        lines.append(f"  note: {', '.join(inherited)} inherited the billing.yaml default rate "
+                     f"rather than carrying one of their own")
     unpriced = [game for game, sub in report["instances"].items() if not sub.get("rate_configured", True)]
     if unpriced:
-        lines.append(f"  WARNING: no run_cost_per_hour in billing.yaml for {', '.join(unpriced)} -- "
-                     f"playtime is recorded but bills as zero")
+        lines.append(f"  WARNING: no run_cost_per_hour in billing.yaml for {', '.join(unpriced)}, "
+                     f"and no defaults entry to inherit -- playtime is recorded but bills as zero")
     lines += ["", "  (Dry run -- no money is charged. Each game is costed on its own rate and group",
               "   multiplier, then summed per player.)"]
     return "\n".join(lines)
